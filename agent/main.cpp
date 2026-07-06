@@ -135,14 +135,11 @@ void receiver() {
             ip,
             std::chrono::steady_clock::now()
         };
-
-        std::lock_guard<std::mutex> unlock(nodesMutex);
     }
 }
 
 void printer() {
     while (running) {
-        std::vector<std::string> toDelete;
         std::cout << "\033[2J\033[H";
         std::cout << "=== LNOS NODES ===" << std::endl;
 
@@ -150,20 +147,34 @@ void printer() {
 
         for (const auto& n : nodes) {
             if (n.second.name == myName) continue;
-
-            if (std::chrono::steady_clock::now() - n.second.lastSeen > std::chrono::seconds(15)) {
-                toDelete.push_back(n.second.name);
-            }
-
             std::cout << n.second.name
                       << " - " << n.second.ip << std::endl;
         }
 
-        if (!toDelete.empty()) {
+        std::this_thread::sleep_for(std::chrono::seconds(10));
+    }
+}
+
+void cleanup() {
+    while (running) {
+
+        std::vector<std::string> toDelete;
+
+        {
+            std::lock_guard<std::mutex> lock(nodesMutex);
+
+            for (const auto& n : nodes) {
+                if (std::chrono::steady_clock::now() - n.second.lastSeen
+                    > std::chrono::seconds(15)) {
+                    toDelete.push_back(n.first);
+                    }
+            }
+
             for (const auto& name : toDelete) {
                 nodes.erase(name);
             }
         }
+
         std::this_thread::sleep_for(std::chrono::seconds(10));
     }
 }
@@ -174,9 +185,11 @@ int main() {
     std::thread t1(sender);
     std::thread t2(receiver);
     std::thread t3(printer);
+    std::thread t4(cleanup);
 
     t1.join();
     t2.join();
     t3.join();
+    t4.join();
     std::cout << "LNOS shutting down..." << std::endl;
 }
