@@ -5,7 +5,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include "../shared/protocol.hpp"
+#include "../shared/protocol.h"
 
 #define PORT 4545
 
