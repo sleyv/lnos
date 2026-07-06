@@ -9,6 +9,8 @@
 #include "protocol.h"
 #include "main.h"
 
+#include <map>
+
 #include "registry.h"
 
 std::string getName() {
@@ -129,14 +131,28 @@ void receiver() {
 
 void printer() {
     while (true) {
+        std::vector<std::string> toDelete;
         std::cout << "\033[2J\033[H";
         std::cout << "=== LNOS NODES ===" << std::endl;
+
         std::lock_guard<std::mutex> lock(nodesMutex);
+
         for (const auto& n : nodes) {
+            if (n.second.name == myName) continue;
+
+            if (std::chrono::steady_clock::now() - n.second.lastSeen > std::chrono::seconds(15)) {
+                toDelete.push_back(n.second.name);
+            }
+
             std::cout << n.second.name
-            << " - " << n.second.ip << std::endl;
+                      << " - " << n.second.ip << std::endl;
         }
-        std::lock_guard<std::mutex> unlock(nodesMutex);
+
+        if (!toDelete.empty()) {
+            for (const auto& name : toDelete) {
+                nodes.erase(name);
+            }
+        }
         std::this_thread::sleep_for(std::chrono::seconds(10));
     }
 }
