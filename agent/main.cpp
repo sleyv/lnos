@@ -4,7 +4,7 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <unistd.h>
-
+#include "ip.h"
 #include "../shared/protocol.h"
 
 #define SERVER_IP "127.0.0.1"
@@ -27,7 +27,7 @@ std::string getName() {
 
 
 std::string myName = getName();
-std::string myIp = "0.0.0.0";
+std::string myIp = getip();
 
 void sender() {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);

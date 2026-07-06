@@ -5,6 +5,7 @@
 #include <sys/ioctl.h>
 #include <net/if.h>
 #include <arpa/inet.h>
+#include "ip.h"
 
 std::string getip()
 {
