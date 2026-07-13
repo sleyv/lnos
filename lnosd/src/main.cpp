@@ -95,6 +95,7 @@ void sender() {
 
         lnos::Packet p;
         p.version = "1";
+        p.type = lnos::PacketTypeAnnounce;
         p.name = myName;
 
         p.services.push_back({
@@ -104,7 +105,7 @@ void sender() {
 
         //p.services = cfg.services;
 
-        std::string msg = lnos::encode(p);
+        lnos::Blob msg = lnos::encode(p);
 
         std::cout << "[debug] sending "
                   << msg.size()
@@ -112,7 +113,7 @@ void sender() {
 
 
         if (sendto(sock,
-                   msg.c_str(),
+                   msg.data(),
                    msg.size(),
                    0,
                    reinterpret_cast<sockaddr*>(&addr),
@@ -249,19 +250,20 @@ void receiver() {
                   << "\n";
 
 
-        lnos::Packet p = lnos::decode(buffer);
-
-
-        std::lock_guard<std::mutex> lock(nodesMutex);
-
-
-        nodes[p.name] = {
-            p.name,
-            ip,
-            p.services,
-            std::chrono::steady_clock::now(),
-            NodeStatus::Online
-        };
+        lnos::EncodedPacket encoded((uint8_t *) buffer, len);
+        lnos::Packet p;
+        if (lnos::decode(encoded, p)) {
+            std::lock_guard<std::mutex> lock(nodesMutex);
+            nodes[p.name] = {
+                p.name,
+                ip,
+                p.services,
+                std::chrono::steady_clock::now(),
+                NodeStatus::Online
+            };
+        } else {
+            std::cerr << "[error] received invalid packet\n";
+        }
     }
 
 
