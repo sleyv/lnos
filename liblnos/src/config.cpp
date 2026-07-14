@@ -19,13 +19,6 @@ namespace lnos {
             nameFile >> cfg.name;
         }
 
-
-        std::ifstream interfaceFile("/etc/lnos/interface");
-
-        if (interfaceFile.is_open()) {
-            interfaceFile >> cfg.interface;
-        }
-
         std::ifstream servicesFile("/etc/lnos/services");
 
         if (servicesFile.is_open()) {
@@ -65,18 +58,6 @@ namespace lnos {
             return false;
         }
 
-        if (key == "interface") {
-
-            std::ofstream file("/etc/lnos/interface");
-
-            if (file.is_open()) {
-                file << value << std::endl;
-                return true;
-            }
-
-            return false;
-        }
-
         return false;
     }
 
@@ -89,19 +70,6 @@ namespace lnos {
         if (key == "name") {
 
             std::ifstream file("/etc/lnos/name");
-
-            if (file.is_open()) {
-                std::string value;
-                file >> value;
-                return value;
-            }
-
-            return "";
-        }
-
-        if (key == "interface") {
-
-            std::ifstream file("/etc/lnos/interface");
 
             if (file.is_open()) {
                 std::string value;
@@ -135,19 +103,6 @@ namespace lnos {
             nameFile << "default.node\n";
             chmod("/etc/lnos/name", 0644);
         }
-
-
-        if (access("/etc/lnos/interface", F_OK) != 0)
-        {
-            std::ofstream interfaceFile("/etc/lnos/interface");
-
-            if (!interfaceFile.is_open())
-                return false;
-
-            interfaceFile << "eth0\n";
-            chmod("/etc/lnos/interface", 0644);
-        }
-
 
         if (access("/etc/lnos/services", F_OK) != 0)
         {

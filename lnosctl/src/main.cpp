@@ -44,7 +44,6 @@ int main(int argc, char** argv)
         return 0;
     } else if (command == "config") {
         std::cout << "Node Name: " << cfg.name << std::endl;
-        std::cout << "Network Interface: " << cfg.interface << std::endl;
 
         return 0;
     } else if (command == "set") {
@@ -64,8 +63,6 @@ int main(int argc, char** argv)
 
         if (key == "name") {
             std::cout << "Node Name: " << cfg.name << std::endl;
-        } else if (key == "interface") {
-            std::cout << "Network Interface: " << cfg.interface << std::endl;
         }
         return 0;
     }

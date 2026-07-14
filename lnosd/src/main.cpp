@@ -11,7 +11,6 @@
 
 #include <lnos/crypto.h>
 #include "registry.h"
-#include <lnos/ip.h>
 #include <lnos/protocol.h>
 #include <lnos/config.h>
 
@@ -363,10 +362,7 @@ int main() {
     lnos::createConfig();
 
     cfg = lnos::loadConfig();
-    myIp = getip(cfg.interface);
-
     std::cout << "My name: " << cfg.name << "\n";
-    std::cout << "My IP: " << myIp << "\n";
 
     std::thread t1(sender);
     std::thread t2(receiver);

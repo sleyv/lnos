@@ -9,7 +9,6 @@ namespace lnos {
 
     struct Config {
         std::string name;
-        std::string interface;
         std::vector<Service> services;
     };
 
