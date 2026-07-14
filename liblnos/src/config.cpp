@@ -45,16 +45,17 @@ namespace lnos {
 
     bool setConfig(const std::string& key, const std::string& value)
     {
-        if (geteuid() != 0) {
+        if (geteuid() != 0)
             return false;
-        }
+
+        createConfig();
 
         if (key == "name") {
 
             std::ofstream file("/etc/lnos/name");
 
             if (file.is_open()) {
-                file << value;
+                file << value << std::endl;
                 return true;
             }
 
@@ -66,7 +67,7 @@ namespace lnos {
             std::ofstream file("/etc/lnos/interface");
 
             if (file.is_open()) {
-                file << value;
+                file << value << std::endl;
                 return true;
             }
 
@@ -118,6 +119,7 @@ namespace lnos {
         {
             if (mkdir("/etc/lnos", 0755) != 0)
                 return false;
+            chmod("/etc/lnos", 0755);
         }
 
         if (access("/etc/lnos/name", F_OK) != 0)
@@ -127,7 +129,8 @@ namespace lnos {
             if (!nameFile.is_open())
                 return false;
 
-            nameFile << "default.node";
+            nameFile << "default.node\n";
+            chmod("/etc/lnos/name", 0644);
         }
 
 
@@ -138,7 +141,8 @@ namespace lnos {
             if (!interfaceFile.is_open())
                 return false;
 
-            interfaceFile << "eth0";
+            interfaceFile << "eth0\n";
+            chmod("/etc/lnos/interface", 0644);
         }
 
 
@@ -148,13 +152,9 @@ namespace lnos {
 
             if (!servicesFile.is_open())
                 return false;
+
+            chmod("/etc/lnos/services", 0644);
         }
-
-
-        chmod("/etc/lnos", 0755);
-        chmod("/etc/lnos/name", 0644);
-        chmod("/etc/lnos/interface", 0644);
-        chmod("/etc/lnos/services", 0644);
 
         return true;
     }
