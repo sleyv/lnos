@@ -3,7 +3,7 @@
 #include <lnos/config.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <stdexcept>
+#include <unistd.h>
 
 #include <lnos/crypto.h>
 
@@ -17,6 +17,11 @@ namespace lnos {
 
         if (nameFile.is_open()) {
             nameFile >> cfg.name;
+        } else {
+            char host[256];
+            gethostname(host, sizeof(host));
+            auto hostname = std::string(host);
+            cfg.name = hostname;
         }
 
         std::ifstream servicesFile("/etc/lnos/services");
