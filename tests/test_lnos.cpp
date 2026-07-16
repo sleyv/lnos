@@ -31,6 +31,38 @@ TEST(LnosProtocolTest, EncodeDecodeAnnouncePacket) {
     EXPECT_EQ(decoded.signature, original.signature);
 }
 
+TEST(LnosProtocolTest, QueryPacketEncodeDecode) {
+    lnos::Packet query("target.device.gervaty", {});
+    query.type = lnos::PacketType::Query;
+
+    lnos::Blob blob = lnos::encode(query, true);
+
+    lnos::EncodedPacket encoded{blob.data(), blob.size()};
+    lnos::Packet decoded;
+
+    ASSERT_TRUE(lnos::decode(encoded, decoded));
+    EXPECT_EQ(decoded.type, lnos::PacketType::Query);
+    EXPECT_EQ(decoded.announce.name, "target.device.gervaty");
+    EXPECT_TRUE(decoded.announce.services.empty());
+}
+
+TEST(LnosProtocolTest, ResponsePacketEncodeDecode) {
+    lnos::Packet response("target.device.gervaty", {{"ssh", 22}});
+    response.type = lnos::PacketType::Response;
+
+    lnos::Blob blob = lnos::encode(response, true);
+
+    lnos::EncodedPacket encoded{blob.data(), blob.size()};
+    lnos::Packet decoded;
+
+    ASSERT_TRUE(lnos::decode(encoded, decoded));
+    EXPECT_EQ(decoded.type, lnos::PacketType::Response);
+    EXPECT_EQ(decoded.announce.name, "target.device.gervaty");
+    ASSERT_EQ(decoded.announce.services.size(), 1);
+    EXPECT_EQ(decoded.announce.services[0].name, "ssh");
+    EXPECT_EQ(decoded.announce.services[0].port, 22);
+}
+
 TEST(LnosProtocolTest, DecodeInvalidPacketTypeReturnsFalse) {
     lnos::Blob blob = { 0, 0, 0, 0, 99, 99 }; // Unknown type 9999
     lnos::EncodedPacket encoded{blob.data(), blob.size()};
@@ -113,16 +145,13 @@ TEST(LnosConfigTest, ConfigDirResolution) {
 }
 
 TEST(LnosConfigTest, CustomXdgEnvResolution) {
-    // Save current XDG_CONFIG_HOME if any
     const char* prev_xdg = std::getenv("XDG_CONFIG_HOME");
     std::string prev_xdg_str = prev_xdg ? prev_xdg : "";
 
-    // Set custom XDG_CONFIG_HOME
     setenv("XDG_CONFIG_HOME", "/tmp/xdg_test", 1);
     std::string dir = lnos::getConfigDir();
     EXPECT_EQ(dir, "/tmp/xdg_test/lnos");
 
-    // Restore environment
     if (prev_xdg) {
         setenv("XDG_CONFIG_HOME", prev_xdg_str.c_str(), 1);
     } else {

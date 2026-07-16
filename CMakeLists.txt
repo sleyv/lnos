@@ -19,6 +19,18 @@ add_library(lnos
 
 add_library(lnos::lnos ALIAS lnos)
 
+#
+# libnss_lnos
+#
+add_library(nss_lnos SHARED
+        liblnos/src/nss_lnos.cpp
+)
+set_target_properties(nss_lnos PROPERTIES
+        PREFIX "lib"
+        OUTPUT_NAME "nss_lnos"
+        VERSION "2"
+)
+
 target_include_directories(lnos
         PUBLIC
         liblnos/include

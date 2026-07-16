@@ -30,7 +30,9 @@ constexpr int PROTOCOL_VERSION = 3;
 namespace lnos {
 
     enum class PacketType {
-        Announce
+        Announce = 0,
+        Query = 1,
+        Response = 2
     };
 
     struct Service {
@@ -159,7 +161,9 @@ namespace lnos {
         blobPush(blob, (uint16_t) p.type);
 
         switch (p.type) {
-        case PacketType::Announce: {
+        case PacketType::Announce:
+        case PacketType::Query:
+        case PacketType::Response: {
           const auto& announce = p.announce;
           blobPush(blob, announce.name);
 
@@ -194,7 +198,9 @@ namespace lnos {
         result.type = (PacketType) type;
 
         switch (result.type) {
-        case PacketType::Announce: {
+        case PacketType::Announce:
+        case PacketType::Query:
+        case PacketType::Response: {
           auto& announce = result.announce;
           encodedPacketConsume(packet, announce.name);
 
