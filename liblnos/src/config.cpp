@@ -3,10 +3,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <lnos/config.h>
-#include <sys/stat.h>
 #include <unistd.h>
-
-#include <lnos/crypto.h>
 
 namespace lnos {
 
@@ -100,27 +97,6 @@ namespace lnos {
         }
         return false;
     }
-
-    std::string getConfig(const std::string& key)
-    {
-        std::string dir = getConfigDir();
-
-        if (key == "name") {
-            std::ifstream file(dir + "/name");
-            if (!file.is_open()) return "";
-            std::string value;
-            file >> value;
-            return value;
-        }
-        if (key == "mcast_group") {
-            return readFile(dir + "/mcast_group", "239.255.42.99");
-        }
-        if (key == "port") {
-            return readFile(dir + "/port", "4545");
-        }
-        return "";
-    }
-
 
     bool createConfig()
     {

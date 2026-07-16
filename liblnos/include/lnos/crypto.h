@@ -7,8 +7,6 @@
 
 namespace lnos {
 
-    bool generateKeys();
-
     std::array<uint8_t, PUBLIC_KEY_SIZE> loadPublicKey();
 
     std::array<uint8_t, PRIVATE_KEY_SIZE> loadPrivateKey();

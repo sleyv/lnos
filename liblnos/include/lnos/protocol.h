@@ -4,7 +4,6 @@
 #include <vector>
 #include <cstdint>
 #include <cstring>
-#include <variant>
 #include <endian.h>
 
 constexpr std::size_t PUBLIC_KEY_SIZE = 32;

@@ -722,7 +722,6 @@ void printer() {
         {
             std::shared_lock<std::shared_mutex> lock(nodesMutex);
 
-            // std::cout << "\033[2J\033[H";
             std::cout << "=== LNOS NODES ===" << std::endl;
 
                 for (const auto& n : nodes) {
