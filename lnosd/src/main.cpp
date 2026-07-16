@@ -11,6 +11,9 @@
 #include <atomic>
 #include <array>
 #include <vector>
+#include <set>
+#include <fstream>
+#include <filesystem>
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <netdb.h>
@@ -116,6 +119,8 @@ std::mutex coutMutex;
 
 lnos::Config cfg;
 InterfaceInfo interfaceInfo;
+
+void updateOwnersDB();
 
 void stopWithError(const std::string& message) {
     if (!running.exchange(false))
@@ -488,6 +493,7 @@ void receiver_ipv4(std::string myIp) {
                     NodeStatus::Online,
                     p.publicKey
                 };
+                updateOwnersDB();
             }
         } else {
             std::cerr << "[error] receiver_ipv4: received invalid packet\n";
@@ -700,6 +706,7 @@ void receiver_ipv6(unsigned int ifindex) {
                     NodeStatus::Online,
                     p.publicKey
                 };
+                updateOwnersDB();
             }
         } else {
             std::cerr << "[error] receiver_ipv6: received invalid packet\n";
@@ -751,14 +758,38 @@ void printer() {
     }
 }
 
+void updateOwnersDB() {
+    std::string path = lnos::getConfigDir() + "/owners.db";
+    std::set<std::string> owners;
+    for (const auto& n : nodes) {
+        auto dot = n.first.find_last_of('.');
+        if (dot != std::string::npos && dot + 1 < n.first.size()) {
+            owners.insert(n.first.substr(dot + 1));
+        }
+    }
+    std::ofstream f(path);
+    if (!f.is_open()) return;
+    for (const auto& o : owners) {
+        f << o << "\n";
+    }
+    // chmod 644 so NSS module (running as any user) can read it
+    std::error_code ec;
+    std::filesystem::permissions(path,
+        std::filesystem::perms::owner_read | std::filesystem::perms::owner_write |
+        std::filesystem::perms::group_read | std::filesystem::perms::others_read,
+        std::filesystem::perm_options::replace, ec);
+}
+
 void cleanup() {
     while (running) {
         {
             std::unique_lock<std::shared_mutex> lock(nodesMutex);
+            bool changed = false;
             for (auto it = nodes.begin(); it != nodes.end(); ) {
                 auto age = std::chrono::steady_clock::now() - it->second.lastSeen;
                 if (age > std::chrono::seconds(NODE_TTL_SECONDS * 4)) {
                     it = nodes.erase(it);
+                    changed = true;
                 } else if (age > std::chrono::seconds(NODE_TTL_SECONDS)) {
                     it->second.status = NodeStatus::Offline;
                     ++it;
@@ -766,6 +797,7 @@ void cleanup() {
                     ++it;
                 }
             }
+            if (changed) updateOwnersDB();
         }
         std::this_thread::sleep_for(std::chrono::seconds(10));
     }
@@ -783,13 +815,12 @@ int main() {
 
     cfg = lnos::loadConfig();
     std::cout << "My name: " << cfg.name << "\n";
-    std::cout << "Domain suffix: " << cfg.domainSuffix << "\n";
     std::cout << "Multicast group: " << cfg.mcastGroup << " (IPv4), " << cfg.mcastGroupV6 << " (IPv6)\n";
     std::cout << "Port: " << cfg.port << "\n";
     std::cout << "---\n";
-    std::cout << "Tip: use 'lnosctl set domain .lan' to change your network domain,\n";
-    std::cout << "     'lnosctl set mcast_group <ip>' to change multicast group,\n";
+    std::cout << "Tip: use 'lnosctl set mcast_group <ip>' to change multicast group,\n";
     std::cout << "     'lnosctl set port <num>' to change UDP port.\n";
+    std::cout << "     Name format: device.type.owner (owner is auto-detected for NSS)\n";
     std::cout << "Files are in: " << lnos::getConfigDir() << "\n";
     std::cout << "---\n";
 
@@ -805,6 +836,24 @@ int main() {
     if (!interfaceInfo.has_ipv4 && !interfaceInfo.has_ipv6) {
         stopWithError("No active network interfaces with IPv4 or IPv6 found.");
         return 1;
+    }
+
+    // Seed owners.db with our own owner so NSS works even before peer discovery
+    {
+        std::string path = lnos::getConfigDir() + "/owners.db";
+        if (!std::filesystem::exists(path)) {
+            auto dot = cfg.name.find_last_of('.');
+            if (dot != std::string::npos && dot + 1 < cfg.name.size()) {
+                std::ofstream f(path);
+                if (f.is_open()) {
+                    f << cfg.name.substr(dot + 1) << "\n";
+                    std::filesystem::permissions(path,
+                        std::filesystem::perms::owner_read | std::filesystem::perms::owner_write |
+                        std::filesystem::perms::group_read | std::filesystem::perms::others_read,
+                        std::filesystem::perm_options::replace);
+                }
+            }
+        }
     }
 
     std::vector<std::thread> threads;

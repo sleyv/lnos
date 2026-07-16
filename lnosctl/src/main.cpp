@@ -80,14 +80,13 @@ int main(int argc, char** argv)
         lnos::createConfig();
         auto c = lnos::loadConfig();
         std::cout << "Config created at " << lnos::getConfigDir() << "\n";
-        std::cout << "  Domain suffix: " << c.domainSuffix << " (change with: lnosctl set domain .lan)\n";
+        std::cout << "  Node name: " << c.name << " (name: device.type.owner)\n";
         std::cout << "  Multicast IPv4: " << c.mcastGroup << " (change with: lnosctl set mcast_group <ip>)\n";
         std::cout << "  Port: " << c.port << " (change with: lnosctl set port <num>)\n";
         std::cout << "Generate keys with: lnosctl generatekeys\n";
         return 0;
     } else if (command == "config") {
         std::cout << "Node Name: " << cfg.name << std::endl;
-        std::cout << "Domain Suffix: " << cfg.domainSuffix << std::endl;
         std::cout << "Multicast Group (IPv4): " << cfg.mcastGroup << std::endl;
         std::cout << "Multicast Group (IPv6): " << cfg.mcastGroupV6 << std::endl;
         std::cout << "Port: " << cfg.port << std::endl;
@@ -114,8 +113,6 @@ int main(int argc, char** argv)
 
         if (key == "name") {
             std::cout << "Node Name: " << cfg.name << std::endl;
-        } else if (key == "domain") {
-            std::cout << "Domain Suffix: " << cfg.domainSuffix << std::endl;
         } else if (key == "mcast_group") {
             std::cout << "Multicast Group: " << cfg.mcastGroup << std::endl;
         } else if (key == "port") {

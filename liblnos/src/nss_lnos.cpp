@@ -2,6 +2,9 @@
 #include <netdb.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <cstring>
 #include <string>
@@ -10,14 +13,41 @@
 
 extern "C" {
 
-static std::string cachedSuffix() {
-    static std::string suffix;
-    static bool loaded = false;
-    if (!loaded) {
-        suffix = lnos::getDomainSuffix();
-        loaded = true;
+static bool ownerActive(const std::string& owner) {
+    std::string path = lnos::getConfigDir() + "/owners.db";
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd < 0) return false;
+
+    struct stat sb;
+    if (fstat(fd, &sb) < 0 || sb.st_size == 0) {
+        close(fd);
+        return false;
     }
-    return suffix;
+
+    char* addr = static_cast<char*>(mmap(nullptr, sb.st_size, PROT_READ, MAP_SHARED, fd, 0));
+    close(fd);
+    if (addr == MAP_FAILED) return false;
+
+    std::string contents(addr, sb.st_size);
+    munmap(addr, sb.st_size);
+
+    // Check if owner appears as a full line in the file
+    size_t pos = 0;
+    while (pos < contents.size()) {
+        auto nl = contents.find('\n', pos);
+        if (nl == std::string::npos) nl = contents.size();
+        if (nl - pos == owner.size() && contents.compare(pos, owner.size(), owner) == 0) {
+            return true;
+        }
+        pos = nl + 1;
+    }
+    return false;
+}
+
+static std::string extractOwner(const std::string& name) {
+    auto dot = name.find_last_of('.');
+    if (dot == std::string::npos || dot + 1 >= name.size()) return {};
+    return name.substr(dot + 1);
 }
 
 enum nss_status _nss_lnos_gethostbyname2_r(
@@ -30,10 +60,8 @@ enum nss_status _nss_lnos_gethostbyname2_r(
     int *h_errnop)
 {
     std::string dname(name);
-    std::string suffix = cachedSuffix();
-
-    if (dname.length() <= suffix.length() ||
-        dname.substr(dname.length() - suffix.length()) != suffix) {
+    std::string owner = extractOwner(dname);
+    if (owner.empty() || !ownerActive(owner)) {
         *errnop = ENOENT;
         *h_errnop = HOST_NOT_FOUND;
         return NSS_STATUS_NOTFOUND;

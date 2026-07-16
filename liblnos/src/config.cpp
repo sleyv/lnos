@@ -36,10 +36,6 @@ namespace lnos {
         return line;
     }
 
-    std::string getDomainSuffix() {
-        return readFile(getConfigDir() + "/domain", ".gervaty");
-    }
-
     Config loadConfig()
     {
         Config cfg;
@@ -66,7 +62,6 @@ namespace lnos {
             }
         }
 
-        cfg.domainSuffix = readFile(dir + "/domain", ".gervaty");
         cfg.mcastGroup = readFile(dir + "/mcast_group", "239.255.42.99");
         cfg.mcastGroupV6 = readFile(dir + "/mcast_group_v6", "ff02::4299");
 
@@ -87,12 +82,6 @@ namespace lnos {
 
         if (key == "name") {
             std::ofstream file(dir + "/name");
-            if (!file.is_open()) return false;
-            file << value << std::endl;
-            return true;
-        }
-        if (key == "domain") {
-            std::ofstream file(dir + "/domain");
             if (!file.is_open()) return false;
             file << value << std::endl;
             return true;
@@ -122,9 +111,6 @@ namespace lnos {
             std::string value;
             file >> value;
             return value;
-        }
-        if (key == "domain") {
-            return readFile(dir + "/domain", ".gervaty");
         }
         if (key == "mcast_group") {
             return readFile(dir + "/mcast_group", "239.255.42.99");
