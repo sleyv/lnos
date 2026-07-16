@@ -1,6 +1,7 @@
 #include <iostream>
 #include <thread>
 #include <csignal>
+#include <cerrno>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -32,6 +33,19 @@ std::mutex coutMutex;
 lnos::Config cfg;
 std::string myIp;
 
+void stopWithError(const std::string& message) {
+    if (!running.exchange(false))
+        return;
+
+    std::cerr << "[fatal] " << message << "\n"
+              << "LNOS will now shut down.\n";
+}
+
+void stopAfterSystemError(const char* operation) {
+    perror(operation);
+    stopWithError(std::string("Network operation failed: ") + operation);
+}
+
 bool signPacket(lnos::Packet& packet,
                 const std::array<uint8_t, PRIVATE_KEY_SIZE>& privateKey)
 {
@@ -56,17 +70,21 @@ void sender() {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
 
     if (sock < 0) {
-        perror("sender socket");
+        stopAfterSystemError("sender socket");
         return;
     }
 
     unsigned char ttl = 1;
 
-    setsockopt(sock,
-               IPPROTO_IP,
-               IP_MULTICAST_TTL,
-               &ttl,
-               sizeof(ttl));
+    if (setsockopt(sock,
+                   IPPROTO_IP,
+                   IP_MULTICAST_TTL,
+                   &ttl,
+                   sizeof(ttl)) < 0) {
+        stopAfterSystemError("IP_MULTICAST_TTL");
+        close(sock);
+        return;
+    }
 
     // Разрешаем получать свои же multicast-пакеты
     int loop = 1;
@@ -75,38 +93,42 @@ void sender() {
                    IP_MULTICAST_LOOP,
                    &loop,
                    sizeof(loop)) < 0) {
-        perror("IP_MULTICAST_LOOP");
-                   }
+        stopAfterSystemError("IP_MULTICAST_LOOP");
+        close(sock);
+        return;
+    }
 
     // Указываем интерфейс для multicast
     in_addr localInterface{};
 
     if (inet_pton(AF_INET,
                   myIp.c_str(),
-                  &localInterface) <= 0) {
-        perror("sender inet_pton");
+                  &localInterface) != 1) {
+        stopWithError("Invalid local IPv4 address: '" + myIp + "'");
         close(sock);
         return;
-                  }
+    }
 
     if (setsockopt(sock,
                    IPPROTO_IP,
                    IP_MULTICAST_IF,
                    &localInterface,
                    sizeof(localInterface)) < 0) {
-        perror("IP_MULTICAST_IF");
+        stopAfterSystemError("IP_MULTICAST_IF");
         close(sock);
         return;
-                   }
+    }
 
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(PORT);
 
-    inet_pton(AF_INET,
-              MCAST_GROUP,
-              &addr.sin_addr);
+    if (inet_pton(AF_INET, MCAST_GROUP, &addr.sin_addr) != 1) {
+        stopWithError("Invalid multicast IPv4 address: '" MCAST_GROUP "'");
+        close(sock);
+        return;
+    }
 
     auto privateKey = lnos::loadPrivateKey();
     auto publicKey = lnos::loadPublicKey();
@@ -119,8 +141,8 @@ void sender() {
 
         if (!lnos::signPacket(p, privateKey))
         {
-            std::cerr << "Signing failed\n";
-            continue;
+            stopWithError("Packet signing failed");
+            break;
         }
 
 
@@ -137,8 +159,9 @@ void sender() {
                    0,
                    reinterpret_cast<sockaddr*>(&addr),
                    sizeof(addr)) < 0) {
-            perror("sendto");
-                   }
+            stopAfterSystemError("sendto");
+            break;
+        }
 
 
         std::this_thread::sleep_for(std::chrono::seconds(2));
@@ -150,6 +173,11 @@ void sender() {
 void receiver() {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
 
+    if (sock < 0) {
+        stopAfterSystemError("receiver socket");
+        return;
+    }
+
     int reuse = 1;
 
     if (setsockopt(sock,
@@ -157,11 +185,8 @@ void receiver() {
                    SO_REUSEADDR,
                    &reuse,
                    sizeof(reuse)) < 0) {
-        perror("SO_REUSEADDR");
-                   }
-
-    if (sock < 0) {
-        perror("receiver socket");
+        stopAfterSystemError("SO_REUSEADDR");
+        close(sock);
         return;
     }
 
@@ -170,11 +195,15 @@ void receiver() {
     tv.tv_sec = 1;
     tv.tv_usec = 0;
 
-    setsockopt(sock,
-               SOL_SOCKET,
-               SO_RCVTIMEO,
-               &tv,
-               sizeof(tv));
+    if (setsockopt(sock,
+                   SOL_SOCKET,
+                   SO_RCVTIMEO,
+                   &tv,
+                   sizeof(tv)) < 0) {
+        stopAfterSystemError("SO_RCVTIMEO");
+        close(sock);
+        return;
+    }
 
 
     sockaddr_in addr{};
@@ -187,7 +216,7 @@ void receiver() {
              reinterpret_cast<sockaddr*>(&addr),
              sizeof(addr)) < 0) {
 
-        perror("bind");
+        stopAfterSystemError("bind");
         close(sock);
         return;
     }
@@ -199,17 +228,15 @@ void receiver() {
     // multicast адрес
     if (inet_pton(AF_INET,
                   MCAST_GROUP,
-                  &mreq.imr_multiaddr) <= 0) {
-        perror("multicast address");
+                  &mreq.imr_multiaddr) != 1) {
+        stopWithError("Invalid multicast IPv4 address: '" MCAST_GROUP "'");
         close(sock);
         return;
     }
 
     // интерфейс
-    if (inet_pton(AF_INET,
-                  myIp.c_str(),
-                  &mreq.imr_interface) <= 0) {
-        perror("interface address");
+    if (inet_pton(AF_INET, myIp.c_str(), &mreq.imr_interface) != 1) {
+        stopWithError("Invalid local IPv4 address: '" + myIp + "'");
         close(sock);
         return;
     }
@@ -221,7 +248,7 @@ void receiver() {
                    &mreq,
                    sizeof(mreq)) < 0) {
 
-        perror("IP_ADD_MEMBERSHIP");
+        stopAfterSystemError("IP_ADD_MEMBERSHIP");
         close(sock);
         return;
     }
@@ -235,15 +262,22 @@ void receiver() {
         socklen_t senderLen = sizeof(senderAddr);
 
 
-        int len = recvfrom(sock,
-                           buffer,
-                           sizeof(buffer) - 1,
-                           0,
-                           reinterpret_cast<sockaddr*>(&senderAddr),
-                           &senderLen);
+        ssize_t len = recvfrom(sock,
+                               buffer,
+                               sizeof(buffer) - 1,
+                               0,
+                               reinterpret_cast<sockaddr*>(&senderAddr),
+                               &senderLen);
 
+        if (len < 0) {
+            if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+                stopAfterSystemError("recvfrom");
+                break;
+            }
+            continue;
+        }
 
-        if (len <= 0)
+        if (len == 0)
             continue;
 
 
@@ -252,10 +286,13 @@ void receiver() {
 
         char ip[INET_ADDRSTRLEN];
 
-        inet_ntop(AF_INET,
-                  &senderAddr.sin_addr,
-                  ip,
-                  sizeof(ip));
+        if (inet_ntop(AF_INET,
+                      &senderAddr.sin_addr,
+                      ip,
+                      sizeof(ip)) == nullptr) {
+            stopAfterSystemError("inet_ntop");
+            break;
+        }
 
 
         std::cout << "[debug] received "
@@ -364,5 +401,5 @@ int main() {
     t2.join();
     t3.join();
     t4.join();
-    std::cout << "LNOS shutting down..." << std::endl;
+    std::cout << "LNOS is stopped." << std::endl;
 }
