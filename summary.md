@@ -1,83 +1,112 @@
-# LNOS — Summary
+# LNOS — Local Network Overlay System
 
 ## Репозиторий
 - **URL:** https://github.com/sleyv/lnos (форк Teskum-Researches/lnos)
 - **Ветка:** master
-- **Последний коммит:** `93349e9` — TLD blacklist + atomic owners.db
-- **Uncommitted:** косметические правки в `main.cpp` (подсказки), `setup.sh` (multi-pm), `uninstall.sh`
 
 ## Язык и сборка
-- **C++26** (GCC 16.1.1), fallback C++23 → C++20
+- **C++26** (GCC 16.1.1), fallback C++23 → C++20. В CMake автоматический выбор стандарта.
 - **Зависимости:** libsodium (Ed25519 подпись/верификация)
 - **Сборка без интернета:** `cmake -DBUILD_TESTING=OFF` (GTest не подтягивается)
 - **Артефакты:** `lnosd`, `lnosctl`, `libnss_lnos.so.2`
 
-## Архитектура
-- **Схема имён:** `device.type.owner` (например, `desktop.work.ruslan`)
-- **Dual-stack:** независимые приёмники/передатчики для IPv4 и IPv6
-- **Автоопределение интерфейса:** `getifaddrs()` — первый non-loopback UP/RUNNING
-- **`IP_MULTICAST_IF` / `IPV6_MULTICAST_IF`** — привязка к обнаруженному интерфейсу (и для announce, и для query)
-- **UNIX-сокет:** `~/.config/lnos/lnosd.sock` (не `/tmp` — C-5 fix)
+## Новые фичи (добавлено в форке)
 
-## NSS-модуль (libnss_lnos.so.2)
-- **TLD blacklist:** ~40 популярных TLD (`.com`, `.org`, `.ru`, `.io`, `.app`, `.dev`, `.local` и др.) — скипаются без mmap/сокета
-- **Отключение blacklist:** `LNOS_SKIP_TLDS=0`
-- **mmap owner check:** `/dev/shm/lnos_owners` — NSS проверяет owner (последняя часть имени) через mmap, без syscall'ов
-- Если owner есть — идёт в UNIX-сокет демона
-- Если owner нет — сразу `NOT_FOUND`
-- Суффикс домена кэшируется один раз при загрузке модуля
+### C++26 с fallback
+CMake проверяет поддержку `-std=c++26` → `-std=c++23` → `-std=c++20`. Гарантированно собирается на GCC 14+ и новее.
 
-## Конфигурация (всё без хардкода)
-- **`lnosctl set`:** `domain`, `mcast_group`, `mcast_group_v6`, `port`, `name`
-- **Дефолты:** `.gervaty`, `239.255.42.99:4545`, `ff02::4299:4545`
-- **Config dir:** XDG (`~/.config/lnos`) → `/etc/lnos`
-- **XDG_CONFIG_HOME** поддерживается
+### Dual-Stack IPv4/IPv6
+Демон через `getifaddrs()` определяет активный сетевой интерфейс (первый non-loopback UP/RUNNING) и запускает независимые приёмники/передатчики для IPv4 и IPv6. На IPv6 сокет установлен `IPV6_V6ONLY` — иначе он перехватывает IPv4 трафик и bind падает с `EADDRINUSE`.
 
-## owners.db
-- Пишется **атомарно** (tmp + rename + permissions перед rename)
-- Содержит список owner'ов, известных демону
-- Обновляется при добавлении/удалении узлов
-- Сидится своим owner'ом при старте
+### Привязка multicast к интерфейсу
+`IP_MULTICAST_IF` (по IPv4-адресу) и `IPV6_MULTICAST_IF` (по ifindex) при отправке Announce и Query. Пакеты уходят через обнаруженный интерфейс, а не через дефолтный маршрут.
 
-## Безопасность (все исправлено)
-| CVE-like | Проблема | Статус |
-|----------|----------|--------|
-| C-1 | Приватные ключи world-readable | 750/644, ручной chmod 600 |
-| C-2 | Name takeover (нет проверки подписи) | Проверка publicKey при привязке |
-| C-3 | sodium_init() не вызывался | Вызов в main() |
-| C-4 | OOM через nodes map (никогда не удалялись) | 1000 лимит, eviction через 4×TTL |
-| C-5 | UNIX-сокет в /tmp (symlink race) | Перенесён в ~/.config/lnos |
-| H-3/H-4 | OOM через decode (uint64_t длина строки/сервисов) | Лимит 1024 байта / 256 сервисов |
-| H-5 | Single-threaded query server | Каждый клиент в отдельном треде |
+### Self-registration узла
+Узел регистрирует себя в `nodes` map при старте, не полагаясь на multicast loopback (который не работает на некоторых WiFi-драйверах). Резолвинг собственного имени работает всегда.
 
-## UB / Code quality
-- `union PacketAs` → прямое хранение (UB)
-- `*(uint64_t*)` → `std::memcpy` (strict aliasing + ARM)
-- `std::shared_mutex` вместо `std::mutex`
-- `default: return false` в decode
-- Мёртвый код удалён
+### NSS-модуль (libnss_lnos.so.2)
+Системная интеграция: `getaddrinfo("device.type.owner")` работает в любых программах (ssh, ping, curl, getent). Модуль:
+1. Проверяет TLD blacklist — если имя заканчивается на известный TLD (`.com`, `.org`, `.ru` и т.д.) → сразу `NOT_FOUND`
+2. Извлекает owner (последняя часть имени) и проверяет через mmap `owners.db`
+3. Если owner в сети — идёт в UNIX-сокет демона и получает IP
+4. Если нет — `NOT_FOUND` без единого syscall'а
+
+Отключение TLD blacklist: `LNOS_SKIP_TLDS=0`.
+
+### mmap-based owner check
+NSS читает `/etc/lnos/owners.db` через mmap — проверка owner'а без единого syscall'а после mmap. Если owner есть в сети — идёт в UNIX-сокет. Если нет — сразу `NOT_FOUND`.
+
+### TLD blacklist
+~40 популярных TLD (`.com`, `.org`, `.net`, `.ru`, `.io`, `.app`, `.dev`, `.local`, `.localhost` и др.) — NSS скипает их сразу, без mmap и сокета. Отключается `LNOS_SKIP_TLDS=0`.
+
+### Query/Response протокол
+Два новых типа пакетов. Если демон не знает имя в локальном реестре — рассылает multicast Query. Целевой узел отвечает unicast Response с IP. После этого имя кэшируется в реестре.
+
+### GTest + 12 unit-тестов
+GTest через FetchContent. Проверяется encode/decode (все типы пакетов, пустые имена, дубли портов, лимиты), Ed25519 подпись/верификация (включая tamper), config dir resolution (включая XDG).
+
+### Автоопределение config-директории (XDG)
+`getConfigDir()`: `$XDG_CONFIG_HOME` → `~/.config/lnos` → `/etc/lnos`. `createConfig()` использует `std::filesystem::create_directories()` — не требует root. Все операции с конфигом работают для обычных пользователей.
+
+### Всё конфигурируется (без хардкода)
+`lnosctl set`: `domain`, `mcast_group`, `mcast_group_v6`, `port`, `name`. Дефолты: `.gervaty`, `239.255.42.99:4545`, `ff02::4299:4545`. Никаких зашитых путей, адресов, имён.
+
+### Atomic owners.db
+`owners.db` пишется через tmp + rename — crash-safe. Права выставляются до rename. Список owner'ов собирается из активных узлов в реестре.
+
+### Graceful shutdown
+`stopWithError()` атомарно выставляет `running = false`, все потоки завершаются чисто. SIGINT обрабатывается корректно.
+
+### Big Endian протокол
+Бинарный протокол использует сетевой порядок байт (Big Endian). Две машины с разным порядком байтов понимают друг друга.
+
+### Self-registration узла
+Узел сразу добавляет себя в реестр при старте, без ожидания multicast loopback.
+
+## Security-фиксы
+
+| ID | Проблема | Решение |
+|----|----------|---------|
+| C-1 | Приватные ключи world-readable (umask) | `createConfig()`: 750 на директорию, 644 на файлы |
+| C-2 | Name takeover — подписи не проверялись при привязке имени | В `Node` добавлено `publicKey`. Несовпадение ключа → пакет отклонён |
+| C-3 | `sodium_init()` не вызывался — краш или тихая некорректная подпись | `sodium_init()` с проверкой в `main()`. Ключи грузятся однократно через `static` |
+| C-4 | OOM через nodes map — clean-up только ставил `Offline`, не удаляя | Мёртвые ноды удаляются через 4×TTL. Лимит — 1000 узлов |
+| C-5 | UNIX-сокет в `/tmp` — symlink race (LPE) | Сокет в `~/.config/lnos/lnosd.sock` |
+| H-3/H-4 | OOM через decode — `uint64_t` длина строки/сервисов | Лимит строки 1024 байта, сервисов 256 |
+| H-5 | Single-threaded query server — блокировка accept | Каждый клиент в отдельном треде. Backlog 128 |
+
+### Missing IP_MULTICAST_IF в sendMulticastQuery
+Query-пакеты уходили через дефолтный маршрут. Добавлен `IP_MULTICAST_IF` / `IPV6_MULTICAST_IF`.
+
+## UB Fixes & Code Quality
+
+- `union PacketAs` → прямое хранение (UB с `std::string` + `std::vector`)
+- `*(uint64_t*)packet.data` → `std::memcpy` (strict aliasing + bus error на ARM)
+- `default: return false` в decode — неизвестный тип пакета не читает мусор
+- `std::shared_mutex` вместо `std::mutex` — читатели не блокируют друг друга
+- Мёртвый код удалён: дубли `signPacket()`, неиспользуемые `publicKey`/`coutMutex`, глобальная `myIp`
 
 ## Тесты
 - **12/12 GTest** — все зелёные
-- Покрытие: encode/decode (все типы пакетов, пустые имена, дубли портов, лимиты), Ed25519 подпись/верификация (включая tamper), config dir resolution (включая XDG)
+- Покрытие: encode/decode всех типов пакетов, пустые имена, дубли портов, лимиты строк и сервисов, Ed25519 подпись/верификация (включая tamper), config dir resolution, XDG
 
 ## Развёртывание
-- **setup.sh** — автоопределение пакетного менеджера (apt/pacman/dnf/zypper/emerge/apk), сборка, установка NSS, nsswitch.conf, systemd unit (или OpenRC), firewall, seeding owners.db
-- **uninstall.sh** — полный откат
-- **systemd:** `lnosd.service` с `Restart=on-failure`
-- **Firewall:** ufw / firewalld / iptables — открытие multicast группы
+- **setup.sh** — автоопределение пакетного менеджера (apt/pacman/dnf/zypper/emerge/apk), сборка, установка NSS + nsswitch.conf + systemd/OpenRC + firewall + seeding owners.db
+- **uninstall.sh** — полный откат: остановка демона, удаление NSS, откат nsswitch.conf, очистка firewall, удаление конфигов и build
+- **systemd:** `lnosd.service` с `Restart=on-failure`, `After=network-online.target`
+- **Проверка root:** оба скрипта проверяют `is_root()`
 
-## Известные ограничения при развёртывании на 10+ серверах
-1. **Одна multicast группа:** все узлы должны быть в одном L2-сегменте (или VPN) — multicast не роутится между подсетями без PIM
-2. **Нет шифрования данных** (только подпись пакетов, payload открытый)
-3. **Защита от DDoS:** только лимит 1000 узлов — нет rate limiting на пакеты/сек
-4. **Единая точка отказа:** нет распределённого реестра (gossip) — каждый узел хранит только то, что услышал
-5. **Query/Response** — 400ms sleep при cache miss (блокирует ответ клиенту, хоть и в отдельном треде)
-6. **NSS суффикс** кэшируется на всё время жизни процесса — смена домена требует перезапуска всех NSS-клиентов
+## Известные ограничения
+1. Multicast не роутится между L2-сегментами без PIM — все узлы в одной подсети/VPN
+2. Payload открытый (только подпись Ed25519, без шифрования)
+3. Защита от DDoS: лимит 1000 узлов, нет rate limiting
+4. Нет распределённого реестра (gossip) — каждый узел хранит только то, что услышал
+5. Query/Response — 400ms sleep при cache miss
+6. Суффикс домена кэшируется в NSS на время жизни процесса
 
-## Что дальше (roadmap)
+## Roadmap
 - Gossip-based sync реестра
-- Шифрование payload (NaCl)
+- Шифрование payload (NaCl/Box)
 - Rate limiting / DoS protection
 - Web UI / визуализация топологии
 - Service discovery (авторегистрация сервисов)
