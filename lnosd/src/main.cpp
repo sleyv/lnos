@@ -821,8 +821,9 @@ int main() {
     std::cout << "Multicast group: " << cfg.mcastGroup << " (IPv4), " << cfg.mcastGroupV6 << " (IPv6)\n";
     std::cout << "Port: " << cfg.port << "\n";
     std::cout << "---\n";
-    std::cout << "Tip: use 'lnosctl set mcast_group <ip>' to change multicast group,\n";
-    std::cout << "     'lnosctl set port <num>' to change UDP port.\n";
+    std::cout << "Tip: all nodes in the network must use the same multicast group and port.\n";
+    std::cout << "     Change them only if they conflict with existing services.\n";
+    std::cout << "     'lnosctl set mcast_group <ip>'  'lnosctl set port <num>'\n";
     std::cout << "     Name format: device.type.owner (owner is auto-detected for NSS)\n";
     std::cout << "Files are in: " << lnos::getConfigDir() << "\n";
     std::cout << "---\n";

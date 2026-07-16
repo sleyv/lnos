@@ -8,79 +8,101 @@ info()  { echo -e "\e[1;32m[INFO]\e[0m $*"; }
 warn()  { echo -e "\e[1;33m[WARN]\e[0m $*"; }
 err()   { echo -e "\e[1;31m[ERRO]\e[0m $*" >&2; }
 
+is_root() { [ "$(id -u)" -eq 0 ]; }
+
 info "=== LNOS setup ==="
 
-# ----- dependencies -----
-DEPS=""
-for cmd in cmake g++ make; do
-    command -v "$cmd" >/dev/null 2>&1 || DEPS="$DEPS $cmd"
-done
-if pkg-config --exists libsodium 2>/dev/null; then
-    : 
-elif ldconfig -p 2>/dev/null | grep -q libsodium; then
-    :
-else
-    DEPS="$DEPS libsodium"
+# ----- deps -----
+PM=""
+APT_DEPS="cmake g++ make libsodium-dev"
+PAC_DEPS="cmake gcc make libsodium"
+DNF_DEPS="cmake gcc-c++ make libsodium-devel"
+ZYP_DEPS="cmake gcc-c++ make libsodium-devel"
+EMG_DEPS="dev-util/cmake sys-devel/gcc dev-libs/libsodium"
+APK_DEPS="cmake g++ make libsodium-dev"
+
+if command -v apt-get >/dev/null 2>&1; then      PM="apt-get"
+elif command -v pacman >/dev/null 2>&1; then    PM="pacman"
+elif command -v dnf >/dev/null 2>&1; then       PM="dnf"
+elif command -v zypper >/dev/null 2>&1; then    PM="zypper"
+elif command -v emerge >/dev/null 2>&1; then    PM="emerge"
+elif command -v apk >/dev/null 2>&1; then       PM="apk"
 fi
 
-if [ -n "$DEPS" ]; then
-    info "Missing dependencies:$DEPS"
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -qq && apt-get install -y -qq cmake g++ make libsodium-dev
-    elif command -v pacman >/dev/null 2>&1; then
-        pacman -S --noconfirm cmake gcc make libsodium
-    elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y cmake gcc-c++ make libsodium-devel
-    else
-        warn "Unknown package manager. Install deps manually: cmake, g++, libsodium"
-    fi
+MISSING=""
+for cmd in cmake g++ make; do
+    command -v "$cmd" >/dev/null 2>&1 || MISSING="$MISSING $cmd"
+done
+if ! ldconfig -p 2>/dev/null | grep -q libsodium && ! pkg-config --exists libsodium 2>/dev/null; then
+    MISSING="$MISSING libsodium"
+fi
+
+if [ -n "$MISSING" ]; then
+    info "Installing dependencies:$MISSING"
+    case "$PM" in
+        apt-get) [ "$(id -u)" -eq 0 ] && apt-get update -qq && apt-get install -y -qq $APT_DEPS || warn "run as root: apt-get install $APT_DEPS" ;;
+        pacman)  pacman -S --noconfirm $PAC_DEPS ;;
+        dnf)     dnf install -y $DNF_DEPS ;;
+        zypper)  zypper install -y $ZYP_DEPS ;;
+        emerge)  emerge --ask n $EMG_DEPS ;;
+        apk)     apk add $APK_DEPS ;;
+        *)       warn "Unknown package manager. Install: cmake, g++, libsodium-dev" ;;
+    esac
 fi
 
 # ----- build -----
 info "Building LNOS..."
-cmake -S "$LNOS_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release
+cmake -S "$LNOS_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
 cmake --build "$BUILD_DIR" -j"$(nproc)"
 
+# ----- determine lib dir -----
+for d in /usr/lib64 /usr/lib /lib64 /lib; do
+    if [ -f "$d/libnss_files.so.2" ]; then
+        LIBDIR="$d"
+        break
+    fi
+done
+[ -n "$LIBDIR" ] || LIBDIR="/usr/lib"
+
 # ----- install NSS module -----
-LIBDIR="/usr/lib"
-if [ -d /usr/lib64 ] && [ ! -L /usr/lib64 ]; then
-    LIBDIR="/usr/lib64"
-fi
 cp "$BUILD_DIR/libnss_lnos.so.2" "$LIBDIR/"
 ldconfig
-info "NSS module installed to $LIBDIR/libnss_lnos.so.2"
+info "NSS module → $LIBDIR/libnss_lnos.so.2"
 
-# ----- configure nsswitch.conf -----
-NSSWITCH="/etc/nsswitch.conf"
-if grep -q "^hosts:.*\<lnos\>" "$NSSWITCH" 2>/dev/null; then
-    info "lnos already in nsswitch.conf"
+# ----- nsswitch.conf -----
+if grep -q "^hosts:.*\blnos\b" /etc/nsswitch.conf 2>/dev/null; then
+    info "lnos already in /etc/nsswitch.conf"
 else
-    sed -i 's/^hosts:.*/& lnos/' "$NSSWITCH"
-    info "Added lnos to $NSSWITCH (before dns)"
+    sed -i 's/^hosts:.*/& lnos/' /etc/nsswitch.conf
+    info "Added 'lnos' to /etc/nsswitch.conf (before dns)"
 fi
 
 # ----- LNOS config -----
 info "Configuring LNOS..."
-"$BUILD_DIR/lnosctl" init
+CFG_DIR="$("$BUILD_DIR/lnosctl" init 2>&1 | grep -oP '/\S+lnos')"
+[ -n "$CFG_DIR" ] && CFG_DIR="${CFG_DIR:-$HOME/.config/lnos}"
 
-read -r -p "Device name [default: $(hostname)]: " DEVICE
+HOST="$(hostname)"
+USER="$(whoami)"
+read -r -p "Device name [$(hostname)]: " DEVICE
 DEVICE="${DEVICE:-$(hostname)}"
-read -r -p "Device type (e.g. pc, laptop, server, pi) [pc]: " DTYPE
+read -r -p "Device type (pc/laptop/server/pi) [pc]: " DTYPE
 DTYPE="${DTYPE:-pc}"
 read -r -p "Owner [$(whoami)]: " OWNER
 OWNER="${OWNER:-$(whoami)}"
 
 NODE_NAME="${DEVICE}.${DTYPE}.${OWNER}"
 "$BUILD_DIR/lnosctl" set name "$NODE_NAME"
-info "Node name set to: $NODE_NAME"
+info "Node name → $NODE_NAME"
 
 info "Generating keys..."
 "$BUILD_DIR/lnosctl" generatekeys
 
 # ----- systemd service -----
-UNIT="/etc/systemd/system/lnosd.service"
-if [ ! -f "$UNIT" ]; then
-    cat > "$UNIT" <<EOF
+if command -v systemctl >/dev/null 2>&1; then
+    UNIT="/etc/systemd/system/lnosd.service"
+    if [ ! -f "$UNIT" ]; then
+        cat > "$UNIT" <<EOF
 [Unit]
 Description=LNOS overlay networking daemon
 After=network-online.target
@@ -97,40 +119,59 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl daemon-reload
-    info "systemd unit created: $UNIT"
-else
-    info "systemd unit already exists: $UNIT"
+        systemctl daemon-reload
+        info "systemd unit → $UNIT"
+    else
+        info "systemd unit already exists"
+    fi
+elif command -v rc-update >/dev/null 2>&1; then
+    INITD="/etc/init.d/lnosd"
+    cat > "$INITD" <<EOF
+#!/sbin/openrc-run
+command="$BUILD_DIR/lnosd"
+command_background=true
+pidfile="/run/lnosd.pid"
+EOF
+    chmod +x "$INITD"
+    info "OpenRC init script → $INITD"
 fi
 
 # ----- firewall -----
+info "Firewall: opening multicast group 239.255.42.99:4545"
+info "(all nodes must use the same group:port to discover each other)"
 if command -v ufw >/dev/null 2>&1; then
-    if ! ufw status | grep -q '239.255.42.99'; then
-        ufw allow proto udp from 224.0.0.0/4 to 239.255.42.99 port 4545 comment 'LNOS multicast'
-        info "ufw: allowed multicast 239.255.42.99:4545"
-    fi
+    ufw allow proto udp from 224.0.0.0/4 to 239.255.42.99 port 4545 comment 'LNOS' 2>/dev/null && info "  ufw: done"
 elif command -v firewall-cmd >/dev/null 2>&1; then
-    firewall-cmd --add-rich-rule='rule family="ipv4" destination address="239.255.42.99" port port="4545" protocol="udp" accept' --permanent
-    firewall-cmd --reload
-    info "firewalld: allowed multicast 239.255.42.99:4545"
+    firewall-cmd --permanent --add-rich-rule='rule family="ipv4" destination address="239.255.42.99" port port="4545" protocol="udp" accept' >/dev/null && firewall-cmd --reload >/dev/null && info "  firewalld: done"
+elif command -v iptables >/dev/null 2>&1; then
+    iptables -C INPUT -d 239.255.42.99 -p udp --dport 4545 -j ACCEPT 2>/dev/null || {
+        iptables -A INPUT -d 239.255.42.99 -p udp --dport 4545 -j ACCEPT
+        info "  iptables: done"
+    }
+else
+    warn "  no firewall tool found; ensure multicast is not blocked"
 fi
 
 # ----- seed owners.db -----
-echo "$OWNER" > "$(sudo -u "$SUDO_USER" -H sh -c 'echo $HOME')/.config/lnos/owners.db" 2>/dev/null || true
+echo "$OWNER" > "${CFG_DIR}/owners.db" 2>/dev/null || true
+chmod 644 "${CFG_DIR}/owners.db" 2>/dev/null || true
 
 # ----- done -----
 echo ""
 info "=== LNOS setup complete ==="
 echo ""
 echo "  Node name:     $NODE_NAME"
-echo "  Config dir:    $(sudo -u "$SUDO_USER" -H sh -c 'echo $HOME')/.config/lnos"
+echo "  Config dir:    $CFG_DIR"
 echo "  Build dir:     $BUILD_DIR"
 echo "  NSS module:    $LIBDIR/libnss_lnos.so.2"
-echo "  Systemd unit:  $UNIT"
 echo ""
-echo "  Start daemon:  systemctl start lnosd"
-echo "  Enable auto:   systemctl enable --now lnosd"
-echo "  Check logs:    journalctl -u lnosd -f"
-echo "  Resolve test:  getent hosts ${NODE_NAME}"
+echo "  Start:    systemctl start lnosd"
+echo "  Autostart: systemctl enable --now lnosd"
+echo "  Logs:     journalctl -u lnosd -f"
+echo "  Resolve:  getent hosts ${NODE_NAME}"
+echo "  Uninstall: ./uninstall.sh"
 echo ""
-echo "  (change firewall rules, multicast group, or port in the config files)"
+echo "  All nodes in the same network must use the same multicast group and port."
+echo "  Default is 239.255.42.99:4545 — change only if it conflicts:"
+echo "    lnosctl set mcast_group <ip>"
+echo "    lnosctl set port <num>"
