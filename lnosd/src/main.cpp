@@ -760,6 +760,7 @@ void printer() {
 
 void updateOwnersDB() {
     std::string path = lnos::getConfigDir() + "/owners.db";
+    std::string tmp = path + ".tmp";
     std::set<std::string> owners;
     for (const auto& n : nodes) {
         auto dot = n.first.find_last_of('.');
@@ -767,17 +768,19 @@ void updateOwnersDB() {
             owners.insert(n.first.substr(dot + 1));
         }
     }
-    std::ofstream f(path);
+    // Atomic write: tmp → rename (crash-safe)
+    std::ofstream f(tmp);
     if (!f.is_open()) return;
     for (const auto& o : owners) {
         f << o << "\n";
     }
-    // chmod 644 so NSS module (running as any user) can read it
+    f.close();
     std::error_code ec;
-    std::filesystem::permissions(path,
+    std::filesystem::permissions(tmp,
         std::filesystem::perms::owner_read | std::filesystem::perms::owner_write |
         std::filesystem::perms::group_read | std::filesystem::perms::others_read,
         std::filesystem::perm_options::replace, ec);
+    std::filesystem::rename(tmp, path, ec);
 }
 
 void cleanup() {
@@ -844,13 +847,17 @@ int main() {
         if (!std::filesystem::exists(path)) {
             auto dot = cfg.name.find_last_of('.');
             if (dot != std::string::npos && dot + 1 < cfg.name.size()) {
-                std::ofstream f(path);
+                std::string tmp = path + ".tmp";
+                std::ofstream f(tmp);
                 if (f.is_open()) {
                     f << cfg.name.substr(dot + 1) << "\n";
-                    std::filesystem::permissions(path,
+                    f.close();
+                    std::error_code ec;
+                    std::filesystem::permissions(tmp,
                         std::filesystem::perms::owner_read | std::filesystem::perms::owner_write |
                         std::filesystem::perms::group_read | std::filesystem::perms::others_read,
-                        std::filesystem::perm_options::replace);
+                        std::filesystem::perm_options::replace, ec);
+                    std::filesystem::rename(tmp, path, ec);
                 }
             }
         }

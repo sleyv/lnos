@@ -8,10 +8,44 @@
 #include <unistd.h>
 #include <cstring>
 #include <string>
+#include <cstdlib>
 #include <arpa/inet.h>
 #include <lnos/config.h>
 
 extern "C" {
+
+static bool tldSkipped(const std::string& name) {
+    static const char* skip[] = {
+        ".com", ".org", ".net", ".edu", ".gov", ".mil",
+        ".ru", ".рф", ".su", ".by", ".kz", ".ua",
+        ".de", ".fr", ".uk", ".it", ".es", ".pl",
+        ".cn", ".jp", ".kr", ".in", ".br",
+        ".io", ".ai", ".app", ".dev", ".me", ".cc",
+        ".info", ".biz", ".pro", ".name", ".mobi",
+        ".site", ".online", ".store", ".blog", ".tech",
+        ".xyz", ".top", ".club", ".win", ".bid",
+        ".eu", ".asia", ".int", ".arpa",
+        ".local", ".localhost", ".invalid", ".test",
+        nullptr
+    };
+    static bool enabled = true;
+    static bool checked = false;
+    if (!checked) {
+        const char* env = std::getenv("LNOS_SKIP_TLDS");
+        if (env && std::string(env) == "0") enabled = false;
+        checked = true;
+    }
+    if (!enabled) return false;
+
+    for (const char** tld = skip; *tld; ++tld) {
+        std::string s(*tld);
+        if (name.size() > s.size() &&
+            name.substr(name.size() - s.size()) == s) {
+            return true;
+        }
+    }
+    return false;
+}
 
 static bool ownerActive(const std::string& owner) {
     std::string path = lnos::getConfigDir() + "/owners.db";
@@ -31,7 +65,6 @@ static bool ownerActive(const std::string& owner) {
     std::string contents(addr, sb.st_size);
     munmap(addr, sb.st_size);
 
-    // Check if owner appears as a full line in the file
     size_t pos = 0;
     while (pos < contents.size()) {
         auto nl = contents.find('\n', pos);
@@ -60,6 +93,13 @@ enum nss_status _nss_lnos_gethostbyname2_r(
     int *h_errnop)
 {
     std::string dname(name);
+
+    if (tldSkipped(dname)) {
+        *errnop = ENOENT;
+        *h_errnop = HOST_NOT_FOUND;
+        return NSS_STATUS_NOTFOUND;
+    }
+
     std::string owner = extractOwner(dname);
     if (owner.empty() || !ownerActive(owner)) {
         *errnop = ENOENT;
