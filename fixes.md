@@ -5,7 +5,7 @@
 ## Новые фичи
 
 ### Dual-Stack IPv4/IPv6
-Демон автоматически определяет сетевой интерфейс (через `getifaddrs()`) и запускает независимые приёмники/передатчики для IPv4 (`239.255.42.99`) и IPv6 (`ff02::4299`). На IPv6 сокет установлен `IPV6_V6ONLY` — без этого он перехватывает IPv4 трафик и bind падает с `EADDRINUSE`.
+Демон автоматически определяет сетевой интерфейс (через `getifaddrs()`) и запускает независимые приёмники/передатчики для IPv4 и IPv6. Multicast-группы и порт настраиваются в конфиге (`mcast_group`, `mcast_group_v6`, `port`). На IPv6 сокет установлен `IPV6_V6ONLY` — без этого он перехватывает IPv4 трафик и bind падает с `EADDRINUSE`.
 
 ### NSS-модуль (libnss_lnos.so.2)
 Системная интеграция: `getaddrinfo("node.gervaty")` работает в любых программах (ssh, ping, curl). Модуль подключается к UNIX-сокету демона, получает IP, преобразует в `struct hostent`. Имена не в `.gervaty` игнорирует (возвращает `NSS_STATUS_NOTFOUND`).
@@ -18,6 +18,9 @@ GTest подтягивается через FetchContent. Проверяется
 
 ### Автоопределение config-директории (XDG)
 `getConfigDir()` проверяет `$XDG_CONFIG_HOME` → `~/.config/lnos` → `/etc/lnos`. `createConfig()` использует `std::filesystem::create_directories()` — не требует root. `setConfig()`/`getConfig()` больше не блокируются для обычных пользователей.
+
+### Всё конфигурируется (без хардкода)
+Домен (`domain`), multicast-группы (`mcast_group`, `mcast_group_v6`) и порт (`port`) — отдельные файлы в конфиг-директории. Можно задать любой суффикс вместо `.gervaty` (`lnosctl set domain .lan`), любые multicast-адреса и порт. В NSS суффикс читается один раз при первой загрузке модуля и кэшируется на время жизни процесса.
 
 ### Graceful shutdown
 `stopWithError()` атомарно выставляет `running = false`, все потоки завершаются чисто. Сигнал SIGINT обрабатывается корректно.
@@ -58,6 +61,11 @@ GTest подтягивается через FetchContent. Проверяется
 **Проблема:** Запросы обрабатывались последовательно. Cache miss + 400ms sleep блокировали весь accept.
 
 **Решение:** Каждый клиент обрабатывается в отдельном треде. Backlog listen увеличен до 128.
+
+### Missing IP_MULTICAST_IF в sendMulticastQuery
+**Проблема:** Query-пакеты уходили через дефолтный маршрут, а не через обнаруженный интерфейс.
+
+**Решение:** Добавлен `IP_MULTICAST_IF` (по IPv4-адресу) и `IPV6_MULTICAST_IF` (по ifindex) при отправке Query.
 
 ### Private key permissions (C-1)
 **Проблема:** Ключи создавались с umask (обычно 644) — world-readable.

@@ -21,10 +21,6 @@
 #include <lnos/protocol.h>
 #include <lnos/config.h>
 
-#define MCAST_GROUP "239.255.42.99"
-#define MCAST_GROUP_V6 "ff02::4299"
-#define PORT 4545
-
 constexpr std::size_t RECV_BUFFER_SIZE = 1024;
 constexpr int ANNOUNCE_INTERVAL_SECONDS = 2;
 constexpr int NODE_TTL_SECONDS = 15;
@@ -119,6 +115,7 @@ std::shared_mutex nodesMutex;
 std::mutex coutMutex;
 
 lnos::Config cfg;
+InterfaceInfo interfaceInfo;
 
 void stopWithError(const std::string& message) {
     if (!running.exchange(false))
@@ -163,10 +160,16 @@ void sendMulticastQuery(const std::string& target_name) {
     if (sock4 >= 0) {
         unsigned char ttl = 1;
         setsockopt(sock4, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
+        if (interfaceInfo.has_ipv4) {
+            in_addr localIf{};
+            if (inet_pton(AF_INET, interfaceInfo.ipv4.c_str(), &localIf) == 1) {
+                setsockopt(sock4, IPPROTO_IP, IP_MULTICAST_IF, &localIf, sizeof(localIf));
+            }
+        }
         sockaddr_in addr4{};
         addr4.sin_family = AF_INET;
-        addr4.sin_port = htons(PORT);
-        if (inet_pton(AF_INET, MCAST_GROUP, &addr4.sin_addr) == 1) {
+        addr4.sin_port = htons(cfg.port);
+        if (inet_pton(AF_INET, cfg.mcastGroup.c_str(), &addr4.sin_addr) == 1) {
             sendto(sock4, msg.data(), msg.size(), 0, reinterpret_cast<sockaddr*>(&addr4), sizeof(addr4));
         }
         close(sock4);
@@ -177,10 +180,13 @@ void sendMulticastQuery(const std::string& target_name) {
     if (sock6 >= 0) {
         int hops = 1;
         setsockopt(sock6, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &hops, sizeof(hops));
+        if (interfaceInfo.has_ipv6) {
+            setsockopt(sock6, IPPROTO_IPV6, IPV6_MULTICAST_IF, &interfaceInfo.index, sizeof(interfaceInfo.index));
+        }
         sockaddr_in6 addr6{};
         addr6.sin6_family = AF_INET6;
-        addr6.sin6_port = htons(PORT);
-        if (inet_pton(AF_INET6, MCAST_GROUP_V6, &addr6.sin6_addr) == 1) {
+        addr6.sin6_port = htons(cfg.port);
+        if (inet_pton(AF_INET6, cfg.mcastGroupV6.c_str(), &addr6.sin6_addr) == 1) {
             sendto(sock6, msg.data(), msg.size(), 0, reinterpret_cast<sockaddr*>(&addr6), sizeof(addr6));
         }
         close(sock6);
@@ -310,9 +316,9 @@ void sender_ipv4(std::string myIp) {
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(PORT);
-    if (inet_pton(AF_INET, MCAST_GROUP, &addr.sin_addr) != 1) {
-        stopWithError("sender_ipv4: Invalid multicast address '" MCAST_GROUP "'");
+    addr.sin_port = htons(cfg.port);
+    if (inet_pton(AF_INET, cfg.mcastGroup.c_str(), &addr.sin_addr) != 1) {
+        stopWithError("sender_ipv4: Invalid multicast address '" + cfg.mcastGroup + "'");
         close(sock);
         return;
     }
@@ -381,7 +387,7 @@ void receiver_ipv4(std::string myIp) {
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(PORT);
+    addr.sin_port = htons(cfg.port);
     addr.sin_addr.s_addr = INADDR_ANY;
 
     if (bind(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
@@ -391,7 +397,7 @@ void receiver_ipv4(std::string myIp) {
     }
 
     ip_mreq mreq{};
-    if (inet_pton(AF_INET, MCAST_GROUP, &mreq.imr_multiaddr) != 1) {
+    if (inet_pton(AF_INET, cfg.mcastGroup.c_str(), &mreq.imr_multiaddr) != 1) {
         stopWithError("receiver_ipv4: Invalid multicast address");
         close(sock);
         return;
@@ -520,9 +526,9 @@ void sender_ipv6(unsigned int ifindex) {
 
     sockaddr_in6 addr{};
     addr.sin6_family = AF_INET6;
-    addr.sin6_port = htons(PORT);
-    if (inet_pton(AF_INET6, MCAST_GROUP_V6, &addr.sin6_addr) != 1) {
-        stopWithError("sender_ipv6: Invalid multicast address '" MCAST_GROUP_V6 "'");
+    addr.sin6_port = htons(cfg.port);
+    if (inet_pton(AF_INET6, cfg.mcastGroupV6.c_str(), &addr.sin6_addr) != 1) {
+        stopWithError("sender_ipv6: Invalid multicast address '" + cfg.mcastGroupV6 + "'");
         close(sock);
         return;
     }
@@ -598,7 +604,7 @@ void receiver_ipv6(unsigned int ifindex) {
 
     sockaddr_in6 addr{};
     addr.sin6_family = AF_INET6;
-    addr.sin6_port = htons(PORT);
+    addr.sin6_port = htons(cfg.port);
     addr.sin6_addr = in6addr_any;
 
     if (bind(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
@@ -608,7 +614,7 @@ void receiver_ipv6(unsigned int ifindex) {
     }
 
     ipv6_mreq mreq{};
-    if (inet_pton(AF_INET6, MCAST_GROUP_V6, &mreq.ipv6mr_multiaddr) != 1) {
+    if (inet_pton(AF_INET6, cfg.mcastGroupV6.c_str(), &mreq.ipv6mr_multiaddr) != 1) {
         stopWithError("receiver_ipv6: Invalid multicast address");
         close(sock);
         return;
@@ -777,29 +783,32 @@ int main() {
 
     cfg = lnos::loadConfig();
     std::cout << "My name: " << cfg.name << "\n";
+    std::cout << "Domain suffix: " << cfg.domainSuffix << "\n";
+    std::cout << "Multicast group: " << cfg.mcastGroup << " (IPv4), " << cfg.mcastGroupV6 << " (IPv6)\n";
+    std::cout << "Port: " << cfg.port << "\n";
 
-    InterfaceInfo info = detectInterface();
-    std::cout << "Detected interface: " << info.name << " (index: " << info.index << ")\n";
-    if (info.has_ipv4) {
-        std::cout << "  IPv4: " << info.ipv4 << "\n";
+    interfaceInfo = detectInterface();
+    std::cout << "Detected interface: " << interfaceInfo.name << " (index: " << interfaceInfo.index << ")\n";
+    if (interfaceInfo.has_ipv4) {
+        std::cout << "  IPv4: " << interfaceInfo.ipv4 << "\n";
     }
-    if (info.has_ipv6) {
-        std::cout << "  IPv6: " << info.ipv6 << "\n";
+    if (interfaceInfo.has_ipv6) {
+        std::cout << "  IPv6: " << interfaceInfo.ipv6 << "\n";
     }
 
-    if (!info.has_ipv4 && !info.has_ipv6) {
+    if (!interfaceInfo.has_ipv4 && !interfaceInfo.has_ipv6) {
         stopWithError("No active network interfaces with IPv4 or IPv6 found.");
         return 1;
     }
 
     std::vector<std::thread> threads;
-    if (info.has_ipv4) {
-        threads.emplace_back(sender_ipv4, info.ipv4);
-        threads.emplace_back(receiver_ipv4, info.ipv4);
+    if (interfaceInfo.has_ipv4) {
+        threads.emplace_back(sender_ipv4, interfaceInfo.ipv4);
+        threads.emplace_back(receiver_ipv4, interfaceInfo.ipv4);
     }
-    if (info.has_ipv6) {
-        threads.emplace_back(sender_ipv6, info.index);
-        threads.emplace_back(receiver_ipv6, info.index);
+    if (interfaceInfo.has_ipv6) {
+        threads.emplace_back(sender_ipv6, interfaceInfo.index);
+        threads.emplace_back(receiver_ipv6, interfaceInfo.index);
     }
     threads.emplace_back(query_server);
     threads.emplace_back(printer);

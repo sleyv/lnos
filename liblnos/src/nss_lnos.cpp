@@ -10,6 +10,16 @@
 
 extern "C" {
 
+static std::string cachedSuffix() {
+    static std::string suffix;
+    static bool loaded = false;
+    if (!loaded) {
+        suffix = lnos::getDomainSuffix();
+        loaded = true;
+    }
+    return suffix;
+}
+
 enum nss_status _nss_lnos_gethostbyname2_r(
     const char *name,
     int af,
@@ -20,7 +30,10 @@ enum nss_status _nss_lnos_gethostbyname2_r(
     int *h_errnop)
 {
     std::string dname(name);
-    if (dname.length() < 8 || dname.substr(dname.length() - 8) != ".gervaty") {
+    std::string suffix = cachedSuffix();
+
+    if (dname.length() <= suffix.length() ||
+        dname.substr(dname.length() - suffix.length()) != suffix) {
         *errnop = ENOENT;
         *h_errnop = HOST_NOT_FOUND;
         return NSS_STATUS_NOTFOUND;
