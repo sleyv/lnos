@@ -22,7 +22,7 @@ namespace lnos {
         return "/etc/lnos";
     }
 
-    static std::string readFile(const std::string& path, const std::string& fallback) {
+    std::string readFile(const std::string& path, const std::string& fallback) {
         std::ifstream f(path);
         if (!f.is_open()) return fallback;
         std::string line;
@@ -85,6 +85,18 @@ namespace lnos {
         }
         if (key == "mcast_group") {
             std::ofstream file(dir + "/mcast_group");
+            if (!file.is_open()) return false;
+            file << value << std::endl;
+            return true;
+        }
+        if (key == "mcast_group_v6") {
+            std::ofstream file(dir + "/mcast_group_v6");
+            if (!file.is_open()) return false;
+            file << value << std::endl;
+            return true;
+        }
+        if (key == "domain") {
+            std::ofstream file(dir + "/domain");
             if (!file.is_open()) return false;
             file << value << std::endl;
             return true;

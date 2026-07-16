@@ -1,5 +1,6 @@
 #include <sodium.h>
 #include <fstream>
+#include <iostream>
 #include <stdexcept>
 
 #include <lnos/crypto.h>
@@ -68,6 +69,10 @@ namespace lnos {
 
         if (file.gcount() != static_cast<std::streamsize>(privateKey.size()))
             throw std::runtime_error("Invalid private.key: " + path);
+
+        if (sodium_mlock(privateKey.data(), privateKey.size()) != 0) {
+            std::cerr << "[warning] failed to mlock private key memory\n";
+        }
 
         return privateKey;
     }

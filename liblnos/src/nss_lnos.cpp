@@ -130,6 +130,7 @@ enum nss_status _nss_lnos_gethostbyname2_r(
     un.sun_family = AF_UNIX;
     std::string socket_path = lnos::getConfigDir() + "/lnosd.sock";
     std::strncpy(un.sun_path, socket_path.c_str(), sizeof(un.sun_path) - 1);
+    un.sun_path[sizeof(un.sun_path) - 1] = '\0';
 
     if (connect(sock, (struct sockaddr*)&un, sizeof(un)) < 0) {
         close(sock);

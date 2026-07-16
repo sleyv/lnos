@@ -28,6 +28,10 @@ constexpr std::size_t RECV_BUFFER_SIZE = 1024;
 constexpr int ANNOUNCE_INTERVAL_SECONDS = 2;
 constexpr int NODE_TTL_SECONDS = 15;
 
+constexpr int QUERY_WAIT_MS = 400;
+constexpr int MAX_ACTIVE_QUERIES = 64;
+constexpr int MAX_PACKETS_PER_SECOND = 200;
+std::atomic<int> activeQueries(0);
 std::atomic<bool> running = true;
 
 struct InterfaceInfo {
@@ -145,7 +149,11 @@ void sendMulticastQuery(const std::string& target_name) {
             privateKey = lnos::loadPrivateKey();
             publicKey = lnos::loadPublicKey();
             keys_loaded = true;
+        } catch (const std::exception& e) {
+            std::cerr << "[error] sendMulticastQuery: " << e.what() << "\n";
+            return;
         } catch (...) {
+            std::cerr << "[error] sendMulticastQuery: unknown error loading keys\n";
             return;
         }
     }
@@ -220,7 +228,7 @@ void handle_client(int client) {
 
         if (resolved_ip == "NOT_FOUND") {
             sendMulticastQuery(qname);
-            std::this_thread::sleep_for(std::chrono::milliseconds(400));
+            std::this_thread::sleep_for(std::chrono::milliseconds(QUERY_WAIT_MS));
             {
                 std::shared_lock<std::shared_mutex> lock(nodesMutex);
                 auto it = nodes.find(qname);
@@ -247,6 +255,7 @@ void query_server() {
     un.sun_family = AF_UNIX;
     std::string socket_path = lnos::getConfigDir() + "/lnosd.sock";
     std::strncpy(un.sun_path, socket_path.c_str(), sizeof(un.sun_path) - 1);
+    un.sun_path[sizeof(un.sun_path) - 1] = '\0';
     unlink(un.sun_path);
 
     if (bind(sock, reinterpret_cast<sockaddr*>(&un), sizeof(un)) < 0) {
@@ -276,7 +285,15 @@ void query_server() {
             break;
         }
 
-        std::thread t(handle_client, client);
+        if (activeQueries >= MAX_ACTIVE_QUERIES) {
+            close(client);
+            continue;
+        }
+        activeQueries++;
+        std::thread t([client]() {
+            handle_client(client);
+            activeQueries--;
+        });
         t.detach();
     }
 
@@ -351,10 +368,12 @@ void sender_ipv4(std::string myIp) {
 
         lnos::Blob msg = lnos::encode(p, true);
 
+#ifndef NDEBUG
         {
             std::lock_guard<std::mutex> lock(coutMutex);
             std::cout << "[debug] sender_ipv4: sending " << msg.size() << " bytes\n";
         }
+#endif
 
         if (sendto(sock, msg.data(), msg.size(), 0, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
             stopAfterSystemError("sender_ipv4 sendto");
@@ -445,9 +464,24 @@ void receiver_ipv4(std::string myIp) {
             break;
         }
 
+#ifndef NDEBUG
         {
             std::lock_guard<std::mutex> lock(coutMutex);
             std::cout << "[debug] receiver_ipv4: received " << len << " bytes from " << ip << "\n";
+        }
+#endif
+
+        // Rate limiting: max MAX_PACKETS_PER_SECOND packets/sec
+        {
+            static auto lastReset = std::chrono::steady_clock::now();
+            static int count = 0;
+            auto now = std::chrono::steady_clock::now();
+            if (now - lastReset > std::chrono::seconds(1)) {
+                count = 0;
+                lastReset = now;
+            }
+            if (++count > MAX_PACKETS_PER_SECOND)
+                continue;
         }
 
         lnos::EncodedPacket encoded((uint8_t *) buffer, len);
@@ -470,7 +504,11 @@ void receiver_ipv4(std::string myIp) {
                             lnos::Blob resp_msg = lnos::encode(resp, true);
                             sendto(sock, resp_msg.data(), resp_msg.size(), 0, reinterpret_cast<sockaddr*>(&senderAddr), senderLen);
                         }
-                    } catch (...) {}
+                    } catch (const std::exception& e) {
+                        std::cerr << "[error] receiver_ipv4: response failed: " << e.what() << "\n";
+                    } catch (...) {
+                        std::cerr << "[error] receiver_ipv4: response failed (unknown)\n";
+                    }
                 }
             } else if (p.type == lnos::PacketType::Announce || p.type == lnos::PacketType::Response) {
                 std::unique_lock<std::shared_mutex> lock(nodesMutex);
@@ -562,10 +600,12 @@ void sender_ipv6(unsigned int ifindex) {
 
         lnos::Blob msg = lnos::encode(p, true);
 
+#ifndef NDEBUG
         {
             std::lock_guard<std::mutex> lock(coutMutex);
             std::cout << "[debug] sender_ipv6: sending " << msg.size() << " bytes\n";
         }
+#endif
 
         if (sendto(sock, msg.data(), msg.size(), 0, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
             stopAfterSystemError("sender_ipv6 sendto");
@@ -658,9 +698,24 @@ void receiver_ipv6(unsigned int ifindex) {
             break;
         }
 
+#ifndef NDEBUG
         {
             std::lock_guard<std::mutex> lock(coutMutex);
             std::cout << "[debug] receiver_ipv6: received " << len << " bytes from " << ip << "\n";
+        }
+#endif
+
+        // Rate limiting: max MAX_PACKETS_PER_SECOND packets/sec
+        {
+            static auto lastReset = std::chrono::steady_clock::now();
+            static int count = 0;
+            auto now = std::chrono::steady_clock::now();
+            if (now - lastReset > std::chrono::seconds(1)) {
+                count = 0;
+                lastReset = now;
+            }
+            if (++count > MAX_PACKETS_PER_SECOND)
+                continue;
         }
 
         lnos::EncodedPacket encoded((uint8_t *) buffer, len);
@@ -683,7 +738,11 @@ void receiver_ipv6(unsigned int ifindex) {
                             lnos::Blob resp_msg = lnos::encode(resp, true);
                             sendto(sock, resp_msg.data(), resp_msg.size(), 0, reinterpret_cast<sockaddr*>(&senderAddr), senderLen);
                         }
-                    } catch (...) {}
+                    } catch (const std::exception& e) {
+                        std::cerr << "[error] receiver_ipv6: response failed: " << e.what() << "\n";
+                    } catch (...) {
+                        std::cerr << "[error] receiver_ipv6: response failed (unknown)\n";
+                    }
                 }
             } else if (p.type == lnos::PacketType::Announce || p.type == lnos::PacketType::Response) {
                 std::unique_lock<std::shared_mutex> lock(nodesMutex);
@@ -807,6 +866,7 @@ void cleanup() {
 
 int main() {
     std::signal(SIGINT, handleSigint);
+    std::signal(SIGTERM, handleSigint);
 
     if (sodium_init() < 0) {
         std::cerr << "[fatal] Failed to initialize libsodium\n";

@@ -22,4 +22,6 @@ namespace lnos {
     bool setConfig(const std::string& key, const std::string& value);
 
     bool createConfig();
+
+    std::string readFile(const std::string& path, const std::string& fallback);
 }

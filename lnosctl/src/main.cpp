@@ -50,6 +50,11 @@ bool generateKeys() {
         std::cerr << "Failed to write private key to " << privPath << std::endl;
         return false;
     }
+
+    if (sodium_mlock(privateKey, sizeof(privateKey)) != 0) {
+        std::cerr << "Warning: failed to mlock private key memory\n";
+    }
+
     return true;
 }
 
@@ -90,6 +95,8 @@ int main(int argc, char** argv)
         std::cout << "Multicast Group (IPv4): " << cfg.mcastGroup << std::endl;
         std::cout << "Multicast Group (IPv6): " << cfg.mcastGroupV6 << std::endl;
         std::cout << "Port: " << cfg.port << std::endl;
+        std::string domain = lnos::readFile(lnos::getConfigDir() + "/domain", ".gervaty");
+        std::cout << "Domain: " << domain << std::endl;
         return 0;
     } else if (command == "set") {
         if (argc < 4) {
@@ -114,9 +121,13 @@ int main(int argc, char** argv)
         if (key == "name") {
             std::cout << "Node Name: " << cfg.name << std::endl;
         } else if (key == "mcast_group") {
-            std::cout << "Multicast Group: " << cfg.mcastGroup << std::endl;
+            std::cout << "Multicast Group (IPv4): " << cfg.mcastGroup << std::endl;
+        } else if (key == "mcast_group_v6") {
+            std::cout << "Multicast Group (IPv6): " << cfg.mcastGroupV6 << std::endl;
         } else if (key == "port") {
             std::cout << "Port: " << cfg.port << std::endl;
+        } else if (key == "domain") {
+            std::cout << "Domain: " << lnos::readFile(lnos::getConfigDir() + "/domain", ".gervaty") << std::endl;
         }
         return 0;
     } else {
