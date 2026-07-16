@@ -16,6 +16,7 @@ add_library(lnos
         liblnos/src/config.cpp
         liblnos/src/crypto.cpp
 )
+set_property(TARGET lnos PROPERTY POSITION_INDEPENDENT_CODE ON)
 
 add_library(lnos::lnos ALIAS lnos)
 
@@ -29,6 +30,10 @@ set_target_properties(nss_lnos PROPERTIES
         PREFIX "lib"
         OUTPUT_NAME "nss_lnos"
         VERSION "2"
+)
+target_link_libraries(nss_lnos
+        PRIVATE
+        lnos::lnos
 )
 
 target_include_directories(lnos

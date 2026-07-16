@@ -134,13 +134,18 @@ void stopAfterSystemError(const char* operation) {
 }
 
 void sendMulticastQuery(const std::string& target_name) {
-    std::array<uint8_t, PRIVATE_KEY_SIZE> privateKey;
-    std::array<uint8_t, PUBLIC_KEY_SIZE> publicKey;
-    try {
-        privateKey = lnos::loadPrivateKey();
-        publicKey = lnos::loadPublicKey();
-    } catch (...) {
-        return;
+    static bool keys_loaded = false;
+    static std::array<uint8_t, PRIVATE_KEY_SIZE> privateKey;
+    static std::array<uint8_t, PUBLIC_KEY_SIZE> publicKey;
+
+    if (!keys_loaded) {
+        try {
+            privateKey = lnos::loadPrivateKey();
+            publicKey = lnos::loadPublicKey();
+            keys_loaded = true;
+        } catch (...) {
+            return;
+        }
     }
 
     lnos::Packet p(target_name, {});
@@ -182,6 +187,44 @@ void sendMulticastQuery(const std::string& target_name) {
     }
 }
 
+void handle_client(int client) {
+    char buf[256];
+    ssize_t n = read(client, buf, sizeof(buf) - 1);
+    if (n > 0) {
+        buf[n] = '\0';
+        std::string qname(buf);
+        while (!qname.empty() && (qname.back() == '\n' || qname.back() == '\r')) {
+            qname.pop_back();
+        }
+
+        std::string resolved_ip = "NOT_FOUND";
+
+        {
+            std::shared_lock<std::shared_mutex> lock(nodesMutex);
+            auto it = nodes.find(qname);
+            if (it != nodes.end() && it->second.status == NodeStatus::Online) {
+                resolved_ip = it->second.ip;
+            }
+        }
+
+        if (resolved_ip == "NOT_FOUND") {
+            sendMulticastQuery(qname);
+            std::this_thread::sleep_for(std::chrono::milliseconds(400));
+            {
+                std::shared_lock<std::shared_mutex> lock(nodesMutex);
+                auto it = nodes.find(qname);
+                if (it != nodes.end() && it->second.status == NodeStatus::Online) {
+                    resolved_ip = it->second.ip;
+                }
+            }
+        }
+
+        std::string resp = resolved_ip + "\n";
+        write(client, resp.data(), resp.length());
+    }
+    close(client);
+}
+
 void query_server() {
     int sock = socket(AF_UNIX, SOCK_STREAM, 0);
     if (sock < 0) {
@@ -191,16 +234,17 @@ void query_server() {
 
     struct sockaddr_un un{};
     un.sun_family = AF_UNIX;
-    std::strncpy(un.sun_path, "/tmp/lnosd.sock", sizeof(un.sun_path) - 1);
+    std::string socket_path = lnos::getConfigDir() + "/lnosd.sock";
+    std::strncpy(un.sun_path, socket_path.c_str(), sizeof(un.sun_path) - 1);
     unlink(un.sun_path);
 
     if (bind(sock, reinterpret_cast<sockaddr*>(&un), sizeof(un)) < 0) {
-        stopWithError("query_server: bind failed");
+        stopWithError("query_server: bind failed to " + socket_path);
         close(sock);
         return;
     }
 
-    if (listen(sock, 10) < 0) {
+    if (listen(sock, 128) < 0) {
         stopWithError("query_server: listen failed");
         unlink(un.sun_path);
         close(sock);
@@ -221,41 +265,8 @@ void query_server() {
             break;
         }
 
-        char buf[256];
-        ssize_t n = read(client, buf, sizeof(buf) - 1);
-        if (n > 0) {
-            buf[n] = '\0';
-            std::string qname(buf);
-            while (!qname.empty() && (qname.back() == '\n' || qname.back() == '\r')) {
-                qname.pop_back();
-            }
-
-            std::string resolved_ip = "NOT_FOUND";
-
-            {
-                std::shared_lock<std::shared_mutex> lock(nodesMutex);
-                auto it = nodes.find(qname);
-                if (it != nodes.end() && it->second.status == NodeStatus::Online) {
-                    resolved_ip = it->second.ip;
-                }
-            }
-
-            if (resolved_ip == "NOT_FOUND") {
-                sendMulticastQuery(qname);
-                std::this_thread::sleep_for(std::chrono::milliseconds(400));
-                {
-                    std::shared_lock<std::shared_mutex> lock(nodesMutex);
-                    auto it = nodes.find(qname);
-                    if (it != nodes.end() && it->second.status == NodeStatus::Online) {
-                        resolved_ip = it->second.ip;
-                    }
-                }
-            }
-
-            std::string resp = resolved_ip + "\n";
-            write(client, resp.data(), resp.length());
-        }
-        close(client);
+        std::thread t(handle_client, client);
+        t.detach();
     }
 
     unlink(un.sun_path);
@@ -453,12 +464,23 @@ void receiver_ipv4(std::string myIp) {
             } else if (p.type == lnos::PacketType::Announce || p.type == lnos::PacketType::Response) {
                 std::unique_lock<std::shared_mutex> lock(nodesMutex);
                 const auto& announce = p.announce;
+                auto it = nodes.find(announce.name);
+                if (it != nodes.end()) {
+                    if (it->second.publicKey != p.publicKey) {
+                        std::cerr << "[error] receiver_ipv4: public key mismatch for node '" << announce.name << "', rejecting (C-2 prevention)\n";
+                        continue;
+                    }
+                } else if (nodes.size() >= 1000) {
+                    std::cerr << "[warning] receiver_ipv4: registry full (1000 limit), ignoring node '" << announce.name << "'\n";
+                    continue;
+                }
                 nodes[announce.name] = {
                     announce.name,
                     ip,
                     announce.services,
                     std::chrono::steady_clock::now(),
-                    NodeStatus::Online
+                    NodeStatus::Online,
+                    p.publicKey
                 };
             }
         } else {
@@ -654,12 +676,23 @@ void receiver_ipv6(unsigned int ifindex) {
             } else if (p.type == lnos::PacketType::Announce || p.type == lnos::PacketType::Response) {
                 std::unique_lock<std::shared_mutex> lock(nodesMutex);
                 const auto& announce = p.announce;
+                auto it = nodes.find(announce.name);
+                if (it != nodes.end()) {
+                    if (it->second.publicKey != p.publicKey) {
+                        std::cerr << "[error] receiver_ipv6: public key mismatch for node '" << announce.name << "', rejecting (C-2 prevention)\n";
+                        continue;
+                    }
+                } else if (nodes.size() >= 1000) {
+                    std::cerr << "[warning] receiver_ipv6: registry full (1000 limit), ignoring node '" << announce.name << "'\n";
+                    continue;
+                }
                 nodes[announce.name] = {
                     announce.name,
                     ip,
                     announce.services,
                     std::chrono::steady_clock::now(),
-                    NodeStatus::Online
+                    NodeStatus::Online,
+                    p.publicKey
                 };
             }
         } else {
@@ -714,24 +747,31 @@ void printer() {
 
 void cleanup() {
     while (running) {
-
         {
             std::unique_lock<std::shared_mutex> lock(nodesMutex);
-
-            for (auto& n : nodes) {
-                if (std::chrono::steady_clock::now() - n.second.lastSeen
-                    > std::chrono::seconds(NODE_TTL_SECONDS)) {
-                    n.second.status = NodeStatus::Offline;
-                    }
+            for (auto it = nodes.begin(); it != nodes.end(); ) {
+                auto age = std::chrono::steady_clock::now() - it->second.lastSeen;
+                if (age > std::chrono::seconds(NODE_TTL_SECONDS * 4)) {
+                    it = nodes.erase(it);
+                } else if (age > std::chrono::seconds(NODE_TTL_SECONDS)) {
+                    it->second.status = NodeStatus::Offline;
+                    ++it;
+                } else {
+                    ++it;
+                }
             }
         }
-
         std::this_thread::sleep_for(std::chrono::seconds(10));
     }
 }
 
 int main() {
     std::signal(SIGINT, handleSigint);
+
+    if (sodium_init() < 0) {
+        std::cerr << "[fatal] Failed to initialize libsodium\n";
+        return 1;
+    }
 
     lnos::createConfig();
 

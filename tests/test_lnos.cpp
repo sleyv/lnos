@@ -108,6 +108,43 @@ TEST(LnosProtocolTest, NullOrTinyBufferDecode) {
     EXPECT_FALSE(lnos::decode(encoded, decoded));
 }
 
+TEST(LnosProtocolTest, ExceedServiceLimit) {
+    // Generate a payload with service count set to 300 (exceeding 256 limit)
+    lnos::Packet p("test", {});
+    lnos::Blob blob = lnos::encode(p, true);
+
+    // Overwrite service count in the raw encoded blob (which is placed after version and type and name)
+    // For simplicity, we can craft an EncodedPacket with an artificially large service count:
+    // format: [version (std::string)] [type (uint16_t)] [name (std::string)] [services len (uint64_t)]
+    // Let's create a custom blob:
+    lnos::Blob custom;
+    lnos::blobPush(custom, std::string("3")); // version
+    lnos::blobPush(custom, (uint16_t)0); // type
+    lnos::blobPush(custom, std::string("node")); // name
+    lnos::blobPush(custom, (uint64_t)300); // 300 services (limit is 256)
+    
+    // Add public key and signature
+    std::array<uint8_t, PUBLIC_KEY_SIZE> pub{};
+    std::array<uint8_t, SIGNATURE_SIZE> sig{};
+    lnos::blobPush(custom, pub);
+    lnos::blobPush(custom, sig);
+
+    lnos::EncodedPacket encoded{custom.data(), custom.size()};
+    lnos::Packet decoded;
+    EXPECT_FALSE(lnos::decode(encoded, decoded)); // Must be rejected by service limit check
+}
+
+TEST(LnosProtocolTest, ExceedStringLengthLimit) {
+    lnos::Blob custom;
+    lnos::blobPush(custom, std::string("3")); // version
+    lnos::blobPush(custom, (uint16_t)0); // type
+    lnos::blobPush(custom, (uint64_t)2000); // string length of 2000 (limit is 1024)
+
+    lnos::EncodedPacket encoded{custom.data(), custom.size()};
+    lnos::Packet decoded;
+    EXPECT_FALSE(lnos::decode(encoded, decoded)); // Must be rejected by string limit check
+}
+
 TEST(LnosCryptoTest, SignAndVerifyPacket) {
     ASSERT_GE(sodium_init(), 0);
 

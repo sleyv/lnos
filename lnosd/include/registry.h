@@ -19,6 +19,7 @@ struct Node {
 
     std::chrono::steady_clock::time_point lastSeen;
     NodeStatus status;
+    std::array<std::uint8_t, PUBLIC_KEY_SIZE> publicKey;
 };
 
 extern std::unordered_map<std::string, Node> nodes;

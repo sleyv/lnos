@@ -132,6 +132,9 @@ namespace lnos {
         uint64_t len = 0;
         if (!encodedPacketConsumeImpl(packet, len))
             return false;
+        // Limit maximum string length to prevent OOM/large-alloc DoS (H-4 protection)
+        if (len > 1024)
+            return false;
         if (packet.len < len)
             return false;
         data = std::string((char *) packet.data, len);
@@ -206,6 +209,9 @@ namespace lnos {
 
           uint64_t len = 0;
           encodedPacketConsume(packet, len);
+          // Limit maximum number of services to prevent OOM reserve DoS (H-3 protection)
+          if (len > 256)
+              return false;
           announce.services.clear();
           announce.services.reserve(len);
 

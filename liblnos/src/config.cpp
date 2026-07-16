@@ -11,12 +11,12 @@
 namespace lnos {
 
     std::string getConfigDir() {
-        if (geteuid() == 0) {
-            return "/etc/lnos";
-        }
         const char* xdg = std::getenv("XDG_CONFIG_HOME");
         if (xdg && *xdg) {
             return std::string(xdg) + "/lnos";
+        }
+        if (geteuid() == 0) {
+            return "/etc/lnos";
         }
         const char* home = std::getenv("HOME");
         if (home && *home) {

@@ -2,32 +2,27 @@
 #include <fstream>
 #include <unistd.h>
 #include <sodium.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <lnos/config.h>
 
 
 bool writeKey(const std::string& path, const unsigned char* key, std::size_t size)
 {
-    std::ofstream file(path, std::ios::binary | std::ios::trunc);
-
-    if (!file.is_open()) {
-        std::cerr << "Cannot open " << path << " for writing\n";
+    int fd = open(path.c_str(), O_CREAT | O_WRONLY | O_TRUNC, S_IRUSR | S_IWUSR);
+    if (fd < 0) {
+        std::cerr << "Cannot open " << path << " for writing securely\n";
         return false;
     }
 
-    file.write(reinterpret_cast<const char*>(key),
-               static_cast<std::streamsize>(size));
-
-    if (!file) {
-        std::cerr << "Cannot write " << path << '\n';
+    ssize_t bytes_written = write(fd, key, size);
+    if (bytes_written < 0 || static_cast<size_t>(bytes_written) != size) {
+        std::cerr << "Failed to write key to " << path << "\n";
+        close(fd);
         return false;
     }
 
-    file.close();
-    if (!file) {
-        std::cerr << "Cannot close " << path << '\n';
-        return false;
-    }
-
+    close(fd);
     return true;
 }
 

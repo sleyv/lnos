@@ -6,6 +6,7 @@
 #include <cstring>
 #include <string>
 #include <arpa/inet.h>
+#include <lnos/config.h>
 
 extern "C" {
 
@@ -38,9 +39,16 @@ enum nss_status _nss_lnos_gethostbyname2_r(
         return NSS_STATUS_TRYAGAIN;
     }
 
+    struct timeval tv{};
+    tv.tv_sec = 1;
+    tv.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
     struct sockaddr_un un{};
     un.sun_family = AF_UNIX;
-    std::strncpy(un.sun_path, "/tmp/lnosd.sock", sizeof(un.sun_path) - 1);
+    std::string socket_path = lnos::getConfigDir() + "/lnosd.sock";
+    std::strncpy(un.sun_path, socket_path.c_str(), sizeof(un.sun_path) - 1);
 
     if (connect(sock, (struct sockaddr*)&un, sizeof(un)) < 0) {
         close(sock);
@@ -107,7 +115,7 @@ enum nss_status _nss_lnos_gethostbyname2_r(
     addr_list[1] = nullptr;
 
     result->h_name = name_ptr;
-    result->h_aliases = addr_list + 1;
+    result->h_aliases = addr_list + 1; 
     result->h_addrtype = af;
     result->h_length = addr_len;
     result->h_addr_list = addr_list;
