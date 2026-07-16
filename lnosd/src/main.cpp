@@ -864,6 +864,19 @@ int main() {
         }
     }
 
+    // Self-register so node can resolve itself even without multicast loopback
+    {
+        std::unique_lock<std::shared_mutex> lock(nodesMutex);
+        nodes[cfg.name] = {
+            cfg.name,
+            interfaceInfo.has_ipv4 ? interfaceInfo.ipv4 : interfaceInfo.ipv6,
+            cfg.services,
+            std::chrono::steady_clock::now(),
+            NodeStatus::Online,
+            lnos::loadPublicKey()
+        };
+    }
+
     std::vector<std::thread> threads;
     if (interfaceInfo.has_ipv4) {
         threads.emplace_back(sender_ipv4, interfaceInfo.ipv4);
