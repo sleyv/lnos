@@ -49,25 +49,23 @@ namespace lnos {
         {}
     };
 
-    using PacketAs = std::variant<PacketAnnounce>;
-
     struct Packet {
         std::string version;
         PacketType type;
-        PacketAs as;
+        PacketAnnounce announce;
         std::array<std::uint8_t, PUBLIC_KEY_SIZE> publicKey;
         std::array<std::uint8_t, SIGNATURE_SIZE> signature;
 
         Packet()
             : version(std::to_string(PROTOCOL_VERSION)),
               type(PacketType::Announce),
-              as(PacketAnnounce({}, {}))
+              announce({}, {})
         {}
 
         Packet(std::string name, std::vector<Service> services)
             : version(std::to_string(PROTOCOL_VERSION)),
               type(PacketType::Announce),
-              as(PacketAnnounce(name, services))
+              announce(name, services)
         {}
     };
 
@@ -155,7 +153,7 @@ namespace lnos {
 
         switch (p.type) {
         case PacketType::Announce: {
-          const auto& announce = std::get<PacketAnnounce>(p.as);
+          const auto& announce = p.announce;
           blobPush(blob, announce.name);
 
           uint64_t len = announce.services.size();
@@ -190,12 +188,12 @@ namespace lnos {
 
         switch (result.type) {
         case PacketType::Announce: {
-          result.as = PacketAnnounce({}, {});
-          auto& announce = std::get<PacketAnnounce>(result.as);
+          auto& announce = result.announce;
           encodedPacketConsume(packet, announce.name);
 
           uint64_t len = 0;
           encodedPacketConsume(packet, len);
+          announce.services.clear();
           announce.services.reserve(len);
 
           for (uint64_t i = 0; i < len; ++i)
@@ -206,6 +204,8 @@ namespace lnos {
             announce.services.push_back(service);
           }
         } break;
+        default:
+          return false;
         }
 
         encodedPacketConsume(packet, result.publicKey);

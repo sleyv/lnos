@@ -51,6 +51,26 @@ target_link_libraries(lnosd
 
 
 #
+# lnos_tests
+#
+find_package(GTest REQUIRED)
+
+add_executable(lnos_tests
+        tests/test_lnos.cpp
+)
+
+target_link_libraries(lnos_tests
+        PRIVATE
+        lnos::lnos
+        GTest::gtest
+        GTest::gtest_main
+)
+
+enable_testing()
+add_test(NAME lnos_unit_tests COMMAND lnos_tests)
+
+
+#
 # lnosctl
 #
 add_executable(lnosctl

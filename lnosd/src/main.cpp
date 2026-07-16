@@ -127,7 +127,6 @@ void handleSigint(int) {
     running = false;
 }
 
-std::array<std::uint8_t, PUBLIC_KEY_SIZE> publicKey;
 std::shared_mutex nodesMutex;
 std::mutex coutMutex;
 
@@ -191,8 +190,16 @@ void sender_ipv4(std::string myIp) {
         return;
     }
 
-    auto privateKey = lnos::loadPrivateKey();
-    auto publicKey = lnos::loadPublicKey();
+    std::array<uint8_t, PRIVATE_KEY_SIZE> privateKey;
+    std::array<uint8_t, PUBLIC_KEY_SIZE> publicKey;
+    try {
+        privateKey = lnos::loadPrivateKey();
+        publicKey = lnos::loadPublicKey();
+    } catch (const std::exception& e) {
+        std::cerr << "[error] sender_ipv4: failed to load keys: " << e.what() << "\n";
+        close(sock);
+        return;
+    }
 
     while (running) {
         lnos::Packet p(cfg.name, cfg.services);
@@ -313,7 +320,7 @@ void receiver_ipv4(std::string myIp) {
             }
             std::unique_lock<std::shared_mutex> lock(nodesMutex);
             if (p.type == lnos::PacketType::Announce) {
-                const auto& announce = std::get<lnos::PacketAnnounce>(p.as);
+                const auto& announce = p.announce;
                 nodes[announce.name] = {
                     announce.name,
                     ip,
@@ -366,8 +373,16 @@ void sender_ipv6(std::string myIp, unsigned int ifindex) {
         return;
     }
 
-    auto privateKey = lnos::loadPrivateKey();
-    auto publicKey = lnos::loadPublicKey();
+    std::array<uint8_t, PRIVATE_KEY_SIZE> privateKey;
+    std::array<uint8_t, PUBLIC_KEY_SIZE> publicKey;
+    try {
+        privateKey = lnos::loadPrivateKey();
+        publicKey = lnos::loadPublicKey();
+    } catch (const std::exception& e) {
+        std::cerr << "[error] sender_ipv6: failed to load keys: " << e.what() << "\n";
+        close(sock);
+        return;
+    }
 
     while (running) {
         lnos::Packet p(cfg.name, cfg.services);
@@ -483,7 +498,7 @@ void receiver_ipv6(unsigned int ifindex) {
             }
             std::unique_lock<std::shared_mutex> lock(nodesMutex);
             if (p.type == lnos::PacketType::Announce) {
-                const auto& announce = std::get<lnos::PacketAnnounce>(p.as);
+                const auto& announce = p.announce;
                 nodes[announce.name] = {
                     announce.name,
                     ip,
