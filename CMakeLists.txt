@@ -53,7 +53,12 @@ target_link_libraries(lnosd
 #
 # lnos_tests
 #
-find_package(GTest REQUIRED)
+include(FetchContent)
+FetchContent_Declare(
+  googletest
+  URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz
+)
+FetchContent_MakeAvailable(googletest)
 
 add_executable(lnos_tests
         tests/test_lnos.cpp
@@ -62,8 +67,8 @@ add_executable(lnos_tests
 target_link_libraries(lnos_tests
         PRIVATE
         lnos::lnos
-        GTest::gtest
-        GTest::gtest_main
+        gtest
+        gtest_main
 )
 
 enable_testing()

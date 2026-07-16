@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstring>
 #include <variant>
+#include <endian.h>
 
 constexpr std::size_t PUBLIC_KEY_SIZE = 32;
 constexpr std::size_t PRIVATE_KEY_SIZE = 64;
@@ -77,14 +78,16 @@ namespace lnos {
     };
 
     inline void blobPush(Blob& blob, uint64_t data) {
-        uint8_t *ptr = (uint8_t *) &data;
-        for (uint64_t i = 0; i < sizeof(data); ++i)
+        uint64_t be_data = htobe64(data);
+        const uint8_t *ptr = reinterpret_cast<const uint8_t*>(&be_data);
+        for (uint64_t i = 0; i < sizeof(be_data); ++i)
             blob.push_back(ptr[i]);
     }
 
     inline void blobPush(Blob& blob, uint16_t data) {
-        uint8_t *ptr = (uint8_t *) &data;
-        for (uint64_t i = 0; i < sizeof(data); ++i)
+        uint16_t be_data = htobe16(data);
+        const uint8_t *ptr = reinterpret_cast<const uint8_t*>(&be_data);
+        for (uint64_t i = 0; i < sizeof(be_data); ++i)
             blob.push_back(ptr[i]);
     }
 
@@ -104,7 +107,9 @@ namespace lnos {
     inline bool encodedPacketConsumeImpl(EncodedPacket& packet, uint64_t& data) {
         if (packet.len < sizeof(uint64_t))
             return false;
-        data = *(uint64_t *) packet.data;
+        uint64_t raw;
+        std::memcpy(&raw, packet.data, sizeof(raw));
+        data = be64toh(raw);
         packet.data += sizeof(uint64_t);
         packet.len -= sizeof(uint64_t);
         return true;
@@ -113,7 +118,9 @@ namespace lnos {
     inline bool encodedPacketConsumeImpl(EncodedPacket& packet, uint16_t& data) {
         if (packet.len < sizeof(uint16_t))
             return false;
-        data = *(uint16_t *) packet.data;
+        uint16_t raw;
+        std::memcpy(&raw, packet.data, sizeof(raw));
+        data = be16toh(raw);
         packet.data += sizeof(uint16_t);
         packet.len -= sizeof(uint16_t);
         return true;

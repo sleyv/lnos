@@ -24,6 +24,9 @@
 #define MCAST_GROUP_V6 "ff02::4299"
 #define PORT 4545
 
+constexpr std::size_t RECV_BUFFER_SIZE = 1024;
+constexpr int ANNOUNCE_INTERVAL_SECONDS = 2;
+constexpr int NODE_TTL_SECONDS = 15;
 
 std::atomic<bool> running = true;
 
@@ -42,18 +45,9 @@ InterfaceInfo detectInterface() {
         return {};
     }
 
-    // Pass 1: find non-loopback active interfaces
-    for (struct ifaddrs* ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
-        if (!ifa->ifa_addr) continue;
-        if (!(ifa->ifa_flags & IFF_UP) || !(ifa->ifa_flags & IFF_RUNNING)) continue;
-        if (ifa->ifa_flags & IFF_LOOPBACK) continue;
-
-        InterfaceInfo info;
-        info.name = ifa->ifa_name;
-        info.index = if_nametoindex(ifa->ifa_name);
-
+    auto extractAddresses = [&](const std::string& name, InterfaceInfo& info) {
         for (struct ifaddrs* ifa2 = ifaddr; ifa2 != nullptr; ifa2 = ifa2->ifa_next) {
-            if (!ifa2->ifa_addr || std::string(ifa2->ifa_name) != info.name) continue;
+            if (!ifa2->ifa_addr || std::string(ifa2->ifa_name) != name) continue;
             if (ifa2->ifa_addr->sa_family == AF_INET) {
                 char host[NI_MAXHOST];
                 if (getnameinfo(ifa2->ifa_addr, sizeof(struct sockaddr_in), host, NI_MAXHOST, nullptr, 0, NI_NUMERICHOST) == 0) {
@@ -73,6 +67,19 @@ InterfaceInfo detectInterface() {
                 }
             }
         }
+    };
+
+    // Pass 1: find non-loopback active interfaces
+    for (struct ifaddrs* ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr) continue;
+        if (!(ifa->ifa_flags & IFF_UP) || !(ifa->ifa_flags & IFF_RUNNING)) continue;
+        if (ifa->ifa_flags & IFF_LOOPBACK) continue;
+
+        InterfaceInfo info;
+        info.name = ifa->ifa_name;
+        info.index = if_nametoindex(ifa->ifa_name);
+
+        extractAddresses(info.name, info);
 
         if (info.has_ipv4 || info.has_ipv6) {
             freeifaddrs(ifaddr);
@@ -90,27 +97,7 @@ InterfaceInfo detectInterface() {
         info.name = ifa->ifa_name;
         info.index = if_nametoindex(ifa->ifa_name);
 
-        for (struct ifaddrs* ifa2 = ifaddr; ifa2 != nullptr; ifa2 = ifa2->ifa_next) {
-            if (!ifa2->ifa_addr || std::string(ifa2->ifa_name) != info.name) continue;
-            if (ifa2->ifa_addr->sa_family == AF_INET) {
-                char host[NI_MAXHOST];
-                if (getnameinfo(ifa2->ifa_addr, sizeof(struct sockaddr_in), host, NI_MAXHOST, nullptr, 0, NI_NUMERICHOST) == 0) {
-                    info.ipv4 = host;
-                    info.has_ipv4 = true;
-                }
-            } else if (ifa2->ifa_addr->sa_family == AF_INET6) {
-                char host[NI_MAXHOST];
-                if (getnameinfo(ifa2->ifa_addr, sizeof(struct sockaddr_in6), host, NI_MAXHOST, nullptr, 0, NI_NUMERICHOST) == 0) {
-                    std::string s(host);
-                    auto pos = s.find('%');
-                    if (pos != std::string::npos) {
-                        s = s.substr(0, pos);
-                    }
-                    info.ipv6 = s;
-                    info.has_ipv6 = true;
-                }
-            }
-        }
+        extractAddresses(info.name, info);
 
         if (info.has_ipv4 || info.has_ipv6) {
             freeifaddrs(ifaddr);
@@ -222,7 +209,7 @@ void sender_ipv4(std::string myIp) {
             break;
         }
 
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+        std::this_thread::sleep_for(std::chrono::seconds(ANNOUNCE_INTERVAL_SECONDS));
     }
 
     close(sock);
@@ -281,7 +268,7 @@ void receiver_ipv4(std::string myIp) {
         return;
     }
 
-    char buffer[1024];
+    char buffer[RECV_BUFFER_SIZE];
 
     while (running) {
         sockaddr_in senderAddr{};
@@ -337,7 +324,7 @@ void receiver_ipv4(std::string myIp) {
     close(sock);
 }
 
-void sender_ipv6(std::string myIp, unsigned int ifindex) {
+void sender_ipv6(unsigned int ifindex) {
     int sock = socket(AF_INET6, SOCK_DGRAM, 0);
     if (sock < 0) {
         std::cerr << "[error] sender_ipv6: failed to create socket\n";
@@ -405,7 +392,7 @@ void sender_ipv6(std::string myIp, unsigned int ifindex) {
             break;
         }
 
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+        std::this_thread::sleep_for(std::chrono::seconds(ANNOUNCE_INTERVAL_SECONDS));
     }
 
     close(sock);
@@ -421,6 +408,14 @@ void receiver_ipv6(unsigned int ifindex) {
     int reuse = 1;
     if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
         std::cerr << "[error] receiver_ipv6: SO_REUSEADDR failed\n";
+        close(sock);
+        return;
+    }
+
+    // Set IPV6_V6ONLY to 1 to allow dual-stack binding of port 4545 without conflict
+    int v6only = 1;
+    if (setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only)) < 0) {
+        std::cerr << "[error] receiver_ipv6: IPV6_V6ONLY failed\n";
         close(sock);
         return;
     }
@@ -459,7 +454,7 @@ void receiver_ipv6(unsigned int ifindex) {
         return;
     }
 
-    char buffer[1024];
+    char buffer[RECV_BUFFER_SIZE];
 
     while (running) {
         sockaddr_in6 senderAddr{};
@@ -565,7 +560,7 @@ void cleanup() {
 
             for (auto& n : nodes) {
                 if (std::chrono::steady_clock::now() - n.second.lastSeen
-                    > std::chrono::seconds(15)) {
+                    > std::chrono::seconds(NODE_TTL_SECONDS)) {
                     n.second.status = NodeStatus::Offline;
                     }
             }
@@ -603,7 +598,7 @@ int main() {
         threads.emplace_back(receiver_ipv4, info.ipv4);
     }
     if (info.has_ipv6) {
-        threads.emplace_back(sender_ipv6, info.ipv6, info.index);
+        threads.emplace_back(sender_ipv6, info.index);
         threads.emplace_back(receiver_ipv6, info.index);
     }
     threads.emplace_back(printer);

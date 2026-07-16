@@ -3,6 +3,7 @@
 #include <lnos/crypto.h>
 #include <lnos/config.h>
 #include <sodium.h>
+#include <cstdlib>
 
 TEST(LnosProtocolTest, EncodeDecodeAnnouncePacket) {
     std::vector<lnos::Service> services = {
@@ -35,6 +36,44 @@ TEST(LnosProtocolTest, DecodeInvalidPacketTypeReturnsFalse) {
     lnos::EncodedPacket encoded{blob.data(), blob.size()};
     lnos::Packet decoded;
     ASSERT_FALSE(lnos::decode(encoded, decoded));
+}
+
+TEST(LnosProtocolTest, EmptyNamePacket) {
+    lnos::Packet original("", {});
+    lnos::Blob blob = lnos::encode(original, true);
+
+    lnos::EncodedPacket encoded{blob.data(), blob.size()};
+    lnos::Packet decoded;
+
+    ASSERT_TRUE(lnos::decode(encoded, decoded));
+    EXPECT_EQ(decoded.announce.name, "");
+    EXPECT_TRUE(decoded.announce.services.empty());
+}
+
+TEST(LnosProtocolTest, DuplicateServicePorts) {
+    std::vector<lnos::Service> services = {
+        {"web1", 80},
+        {"web2", 80}
+    };
+    lnos::Packet original("dup.ports.node", services);
+    lnos::Blob blob = lnos::encode(original, true);
+
+    lnos::EncodedPacket encoded{blob.data(), blob.size()};
+    lnos::Packet decoded;
+
+    ASSERT_TRUE(lnos::decode(encoded, decoded));
+    ASSERT_EQ(decoded.announce.services.size(), 2);
+    EXPECT_EQ(decoded.announce.services[0].name, "web1");
+    EXPECT_EQ(decoded.announce.services[0].port, 80);
+    EXPECT_EQ(decoded.announce.services[1].name, "web2");
+    EXPECT_EQ(decoded.announce.services[1].port, 80);
+}
+
+TEST(LnosProtocolTest, NullOrTinyBufferDecode) {
+    lnos::Blob tinyBlob = { 1, 2 };
+    lnos::EncodedPacket encoded{tinyBlob.data(), tinyBlob.size()};
+    lnos::Packet decoded;
+    EXPECT_FALSE(lnos::decode(encoded, decoded));
 }
 
 TEST(LnosCryptoTest, SignAndVerifyPacket) {
@@ -71,4 +110,22 @@ TEST(LnosCryptoTest, SignAndVerifyPacket) {
 TEST(LnosConfigTest, ConfigDirResolution) {
     std::string dir = lnos::getConfigDir();
     EXPECT_FALSE(dir.empty());
+}
+
+TEST(LnosConfigTest, CustomXdgEnvResolution) {
+    // Save current XDG_CONFIG_HOME if any
+    const char* prev_xdg = std::getenv("XDG_CONFIG_HOME");
+    std::string prev_xdg_str = prev_xdg ? prev_xdg : "";
+
+    // Set custom XDG_CONFIG_HOME
+    setenv("XDG_CONFIG_HOME", "/tmp/xdg_test", 1);
+    std::string dir = lnos::getConfigDir();
+    EXPECT_EQ(dir, "/tmp/xdg_test/lnos");
+
+    // Restore environment
+    if (prev_xdg) {
+        setenv("XDG_CONFIG_HOME", prev_xdg_str.c_str(), 1);
+    } else {
+        unsetenv("XDG_CONFIG_HOME");
+    }
 }
