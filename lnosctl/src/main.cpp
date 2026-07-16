@@ -5,7 +5,7 @@
 #include <lnos/config.h>
 
 
-bool writeKey(const char* path, const unsigned char* key, std::size_t size)
+bool writeKey(const std::string& path, const unsigned char* key, std::size_t size)
 {
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
 
@@ -35,22 +35,24 @@ bool generateKeys() {
     if (sodium_init() < 0) {
         std::cerr << "Failed to initialize libsodium!" << std::endl;
         return false;
-    } if (geteuid() != 0) {
-        std::cerr << "Must be run as root" << std::endl;
-        return false;
     }
+
+    lnos::createConfig();
 
     unsigned char publicKey[crypto_sign_PUBLICKEYBYTES];
     unsigned char privateKey[crypto_sign_SECRETKEYBYTES];
 
     crypto_sign_keypair(publicKey, privateKey);
 
-    if (!writeKey("/etc/lnos/public.key", publicKey, crypto_sign_PUBLICKEYBYTES)) {
-        std::cerr << "Failed to write public key" << std::endl;
+    std::string pubPath = lnos::getConfigDir() + "/public.key";
+    std::string privPath = lnos::getConfigDir() + "/private.key";
+
+    if (!writeKey(pubPath, publicKey, crypto_sign_PUBLICKEYBYTES)) {
+        std::cerr << "Failed to write public key to " << pubPath << std::endl;
         return false;
     }
-    if (!writeKey("/etc/lnos/private.key", privateKey, crypto_sign_SECRETKEYBYTES)) {
-        std::cerr << "Failed to write private key" << std::endl;
+    if (!writeKey(privPath, privateKey, crypto_sign_SECRETKEYBYTES)) {
+        std::cerr << "Failed to write private key to " << privPath << std::endl;
         return false;
     }
     return true;
@@ -78,29 +80,14 @@ int main(int argc, char** argv)
 
     std::string command = argv[1];
     if (command == "generatekeys") {
-        if (geteuid() == 0) {
-            generateKeys();
-        } else {
-            std::cerr << "Must be run as root" << std::endl;
-            return -1;
-        }
+        generateKeys();
     } else if (command == "init") {
-        if (geteuid() != 0) {
-            std::cerr << "Must be run as root" << std::endl;
-            return 1;
-        }
-
         lnos::createConfig();
         return 0;
     } else if (command == "config") {
         std::cout << "Node Name: " << cfg.name << std::endl;
-
         return 0;
     } else if (command == "set") {
-        if (geteuid() != 0) {
-            std::cerr << "Must be run as root" << std::endl;
-            return 1;
-        }
         if (argc < 4) {
             std::cerr << "Not enough arguments" << std::endl;
             return 1;

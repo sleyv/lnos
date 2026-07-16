@@ -4,6 +4,8 @@
 #include <vector>
 #include <cstdint>
 #include <cstring>
+#include <variant>
+#include <endian.h>
 
 constexpr std::size_t PUBLIC_KEY_SIZE = 32;
 constexpr std::size_t PRIVATE_KEY_SIZE = 64;
@@ -28,7 +30,9 @@ constexpr int PROTOCOL_VERSION = 3;
 namespace lnos {
 
     enum class PacketType {
-        Announce
+        Announce = 0,
+        Query = 1,
+        Response = 2
     };
 
     struct Service {
@@ -48,30 +52,23 @@ namespace lnos {
         {}
     };
 
-    union PacketAs {
-      PacketAnnounce announce;
-
-      ~PacketAs()
-      {}
-    };
-
     struct Packet {
         std::string version;
         PacketType type;
-        PacketAs as;
+        PacketAnnounce announce;
         std::array<std::uint8_t, PUBLIC_KEY_SIZE> publicKey;
         std::array<std::uint8_t, SIGNATURE_SIZE> signature;
 
         Packet()
             : version(std::to_string(PROTOCOL_VERSION)),
               type(PacketType::Announce),
-              as(PacketAnnounce({}, {}))
+              announce({}, {})
         {}
 
         Packet(std::string name, std::vector<Service> services)
             : version(std::to_string(PROTOCOL_VERSION)),
               type(PacketType::Announce),
-              as(PacketAnnounce(name, services))
+              announce(name, services)
         {}
     };
 
@@ -83,14 +80,16 @@ namespace lnos {
     };
 
     inline void blobPush(Blob& blob, uint64_t data) {
-        uint8_t *ptr = (uint8_t *) &data;
-        for (uint64_t i = 0; i < sizeof(data); ++i)
+        uint64_t be_data = htobe64(data);
+        const uint8_t *ptr = reinterpret_cast<const uint8_t*>(&be_data);
+        for (uint64_t i = 0; i < sizeof(be_data); ++i)
             blob.push_back(ptr[i]);
     }
 
     inline void blobPush(Blob& blob, uint16_t data) {
-        uint8_t *ptr = (uint8_t *) &data;
-        for (uint64_t i = 0; i < sizeof(data); ++i)
+        uint16_t be_data = htobe16(data);
+        const uint8_t *ptr = reinterpret_cast<const uint8_t*>(&be_data);
+        for (uint64_t i = 0; i < sizeof(be_data); ++i)
             blob.push_back(ptr[i]);
     }
 
@@ -110,7 +109,9 @@ namespace lnos {
     inline bool encodedPacketConsumeImpl(EncodedPacket& packet, uint64_t& data) {
         if (packet.len < sizeof(uint64_t))
             return false;
-        data = *(uint64_t *) packet.data;
+        uint64_t raw;
+        std::memcpy(&raw, packet.data, sizeof(raw));
+        data = be64toh(raw);
         packet.data += sizeof(uint64_t);
         packet.len -= sizeof(uint64_t);
         return true;
@@ -119,7 +120,9 @@ namespace lnos {
     inline bool encodedPacketConsumeImpl(EncodedPacket& packet, uint16_t& data) {
         if (packet.len < sizeof(uint16_t))
             return false;
-        data = *(uint16_t *) packet.data;
+        uint16_t raw;
+        std::memcpy(&raw, packet.data, sizeof(raw));
+        data = be16toh(raw);
         packet.data += sizeof(uint16_t);
         packet.len -= sizeof(uint16_t);
         return true;
@@ -158,13 +161,16 @@ namespace lnos {
         blobPush(blob, (uint16_t) p.type);
 
         switch (p.type) {
-        case PacketType::Announce: {
-          blobPush(blob, p.as.announce.name);
+        case PacketType::Announce:
+        case PacketType::Query:
+        case PacketType::Response: {
+          const auto& announce = p.announce;
+          blobPush(blob, announce.name);
 
-          uint64_t len = p.as.announce.services.size();
+          uint64_t len = announce.services.size();
           blobPush(blob, len);
 
-          for (const auto& s : p.as.announce.services)
+          for (const auto& s : announce.services)
           {
             blobPush(blob, s.name);
             blobPush(blob, s.port);
@@ -192,21 +198,27 @@ namespace lnos {
         result.type = (PacketType) type;
 
         switch (result.type) {
-        case PacketType::Announce: {
-          encodedPacketConsume(packet, result.as.announce.name);
+        case PacketType::Announce:
+        case PacketType::Query:
+        case PacketType::Response: {
+          auto& announce = result.announce;
+          encodedPacketConsume(packet, announce.name);
 
           uint64_t len = 0;
           encodedPacketConsume(packet, len);
-          result.as.announce.services.reserve(len);
+          announce.services.clear();
+          announce.services.reserve(len);
 
           for (uint64_t i = 0; i < len; ++i)
           {
             Service service;
             encodedPacketConsume(packet, service.name);
             encodedPacketConsume(packet, service.port);
-            result.as.announce.services.push_back(service);
+            announce.services.push_back(service);
           }
         } break;
+        default:
+          return false;
         }
 
         encodedPacketConsume(packet, result.publicKey);

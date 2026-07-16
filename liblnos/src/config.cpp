@@ -1,19 +1,36 @@
 #include <fstream>
 #include <sstream>
+#include <cstdlib>
+#include <filesystem>
 #include <lnos/config.h>
 #include <sys/stat.h>
-#include <unistd.h>
 #include <unistd.h>
 
 #include <lnos/crypto.h>
 
 namespace lnos {
 
+    std::string getConfigDir() {
+        if (geteuid() == 0) {
+            return "/etc/lnos";
+        }
+        const char* xdg = std::getenv("XDG_CONFIG_HOME");
+        if (xdg && *xdg) {
+            return std::string(xdg) + "/lnos";
+        }
+        const char* home = std::getenv("HOME");
+        if (home && *home) {
+            return std::string(home) + "/.config/lnos";
+        }
+        return "/etc/lnos";
+    }
+
     Config loadConfig()
     {
         Config cfg;
+        std::string dir = getConfigDir();
 
-        std::ifstream nameFile("/etc/lnos/name");
+        std::ifstream nameFile(dir + "/name");
 
         if (nameFile.is_open()) {
             nameFile >> cfg.name;
@@ -24,7 +41,7 @@ namespace lnos {
             cfg.name = hostname;
         }
 
-        std::ifstream servicesFile("/etc/lnos/services");
+        std::ifstream servicesFile(dir + "/services");
 
         if (servicesFile.is_open()) {
             std::string line;
@@ -46,14 +63,12 @@ namespace lnos {
 
     bool setConfig(const std::string& key, const std::string& value)
     {
-        if (geteuid() != 0)
-            return false;
-
         createConfig();
 
+        std::string dir = getConfigDir();
         if (key == "name") {
 
-            std::ofstream file("/etc/lnos/name");
+            std::ofstream file(dir + "/name");
 
             if (file.is_open()) {
                 file << value << std::endl;
@@ -68,13 +83,10 @@ namespace lnos {
 
     std::string getConfig(const std::string& key)
     {
-        if (geteuid() != 0) {
-            return "";
-        }
-
+        std::string dir = getConfigDir();
         if (key == "name") {
 
-            std::ifstream file("/etc/lnos/name");
+            std::ifstream file(dir + "/name");
 
             if (file.is_open()) {
                 std::string value;
@@ -91,32 +103,33 @@ namespace lnos {
 
     bool createConfig()
     {
-        if (access("/etc/lnos", F_OK) != 0)
-        {
-            if (mkdir("/etc/lnos", 0755) != 0)
-                return false;
-            chmod("/etc/lnos", 0755);
+        std::string dir = getConfigDir();
+        try {
+            std::filesystem::create_directories(dir);
+            std::filesystem::permissions(dir, std::filesystem::perms::owner_all | std::filesystem::perms::group_read | std::filesystem::perms::group_exec | std::filesystem::perms::others_read | std::filesystem::perms::others_exec);
+        } catch (...) {
+            return false;
         }
 
-        if (access("/etc/lnos/name", F_OK) != 0)
-        {
-            std::ofstream nameFile("/etc/lnos/name");
+        std::string namePath = dir + "/name";
+        if (!std::filesystem::exists(namePath)) {
+            std::ofstream nameFile(namePath);
 
             if (!nameFile.is_open())
                 return false;
 
             nameFile << "default.node\n";
-            chmod("/etc/lnos/name", 0644);
+            std::filesystem::permissions(namePath, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write | std::filesystem::perms::group_read | std::filesystem::perms::others_read);
         }
 
-        if (access("/etc/lnos/services", F_OK) != 0)
-        {
-            std::ofstream servicesFile("/etc/lnos/services");
+        std::string servicesPath = dir + "/services";
+        if (!std::filesystem::exists(servicesPath)) {
+            std::ofstream servicesFile(servicesPath);
 
             if (!servicesFile.is_open())
                 return false;
 
-            chmod("/etc/lnos/services", 0644);
+            std::filesystem::permissions(servicesPath, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write | std::filesystem::perms::group_read | std::filesystem::perms::others_read);
         }
 
         return true;

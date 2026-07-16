@@ -12,6 +12,8 @@ namespace lnos {
         std::vector<Service> services;
     };
 
+    std::string getConfigDir();
+
     Config loadConfig();
 
     bool setConfig(const std::string& key, const std::string& value);
