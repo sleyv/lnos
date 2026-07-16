@@ -786,6 +786,12 @@ int main() {
     std::cout << "Domain suffix: " << cfg.domainSuffix << "\n";
     std::cout << "Multicast group: " << cfg.mcastGroup << " (IPv4), " << cfg.mcastGroupV6 << " (IPv6)\n";
     std::cout << "Port: " << cfg.port << "\n";
+    std::cout << "---\n";
+    std::cout << "Tip: use 'lnosctl set domain .lan' to change your network domain,\n";
+    std::cout << "     'lnosctl set mcast_group <ip>' to change multicast group,\n";
+    std::cout << "     'lnosctl set port <num>' to change UDP port.\n";
+    std::cout << "Files are in: " << lnos::getConfigDir() << "\n";
+    std::cout << "---\n";
 
     interfaceInfo = detectInterface();
     std::cout << "Detected interface: " << interfaceInfo.name << " (index: " << interfaceInfo.index << ")\n";

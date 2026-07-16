@@ -2,8 +2,20 @@ cmake_minimum_required(VERSION 3.16)
 
 project(lnos)
 
-set(CMAKE_CXX_STANDARD 20)
+include(CheckCXXCompilerFlag)
+check_cxx_compiler_flag("-std=c++26" CXX26_SUPPORTED)
+if(CXX26_SUPPORTED)
+    set(CMAKE_CXX_STANDARD 26)
+else()
+    check_cxx_compiler_flag("-std=c++23" CXX23_SUPPORTED)
+    if(CXX23_SUPPORTED)
+        set(CMAKE_CXX_STANDARD 23)
+    else()
+        set(CMAKE_CXX_STANDARD 20)
+    endif()
+endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+message(STATUS "C++ standard: ${CMAKE_CXX_STANDARD}")
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SODIUM REQUIRED libsodium)
@@ -70,26 +82,24 @@ target_link_libraries(lnosd
 #
 # lnos_tests
 #
-include(FetchContent)
-FetchContent_Declare(
-  googletest
-  URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz
-)
-FetchContent_MakeAvailable(googletest)
+option(BUILD_TESTING "Build unit tests (requires GTest)" ON)
+if(BUILD_TESTING)
+    include(FetchContent)
+    cmake_policy(SET CMP0135 NEW)
+    FetchContent_Declare(
+      googletest
+      URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz
+    )
+    FetchContent_MakeAvailable(googletest)
 
-add_executable(lnos_tests
-        tests/test_lnos.cpp
-)
-
-target_link_libraries(lnos_tests
-        PRIVATE
-        lnos::lnos
-        gtest
-        gtest_main
-)
-
-enable_testing()
-add_test(NAME lnos_unit_tests COMMAND lnos_tests)
+    add_executable(lnos_tests tests/test_lnos.cpp)
+    target_link_libraries(lnos_tests PRIVATE lnos::lnos gtest gtest_main)
+    enable_testing()
+    add_test(NAME lnos_unit_tests COMMAND lnos_tests)
+    message(STATUS "Tests enabled (GTest via FetchContent)")
+else()
+    message(STATUS "Tests disabled. To skip GTest: cmake -DBUILD_TESTING=OFF")
+endif()
 
 
 #
