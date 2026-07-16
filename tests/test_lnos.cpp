@@ -4,6 +4,7 @@
 #include <lnos/config.h>
 #include <sodium.h>
 #include <cstdlib>
+#include <filesystem>
 
 TEST(LnosProtocolTest, EncodeDecodeAnnouncePacket) {
     std::vector<lnos::Service> services = {
@@ -194,4 +195,229 @@ TEST(LnosConfigTest, CustomXdgEnvResolution) {
     } else {
         unsetenv("XDG_CONFIG_HOME");
     }
+}
+
+TEST(LnosConfigTest, SetAndLoadConfig) {
+    const char* prev_xdg = std::getenv("XDG_CONFIG_HOME");
+    std::string prev = prev_xdg ? prev_xdg : "";
+
+    std::string tmp = "/tmp/lnos_test_config_" + std::to_string(getpid());
+    setenv("XDG_CONFIG_HOME", tmp.c_str(), 1);
+
+    lnos::createConfig();
+    EXPECT_TRUE(lnos::setConfig("name", "test.node.unit"));
+    EXPECT_TRUE(lnos::setConfig("domain", ".test"));
+    EXPECT_TRUE(lnos::setConfig("mcast_group", "224.1.1.1"));
+    EXPECT_TRUE(lnos::setConfig("mcast_group_v6", "ff02::1"));
+    EXPECT_TRUE(lnos::setConfig("port", "9999"));
+
+    lnos::Config cfg = lnos::loadConfig();
+    EXPECT_EQ(cfg.name, "test.node.unit");
+    EXPECT_EQ(cfg.mcastGroup, "224.1.1.1");
+    EXPECT_EQ(cfg.mcastGroupV6, "ff02::1");
+    EXPECT_EQ(cfg.port, 9999);
+
+    EXPECT_EQ(lnos::readFile(tmp + "/lnos/domain", ""), ".test");
+
+    std::filesystem::remove_all(tmp);
+    if (prev.empty()) {
+        unsetenv("XDG_CONFIG_HOME");
+    } else {
+        setenv("XDG_CONFIG_HOME", prev.c_str(), 1);
+    }
+}
+
+TEST(LnosConfigTest, SetConfigInvalidKey) {
+    EXPECT_FALSE(lnos::setConfig("nonexistent", "value"));
+}
+
+TEST(LnosConfigTest, ReadFileFallback) {
+    EXPECT_EQ(lnos::readFile("/nonexistent/path", "default"), "default");
+    EXPECT_EQ(lnos::readFile("/nonexistent/path", ""), "");
+}
+
+TEST(LnosProtocolTest, BigEndianEncode) {
+    std::vector<lnos::Service> svc = {{"test", 1234}};
+    lnos::Packet p("node", svc);
+    p.publicKey.fill(0);
+    p.signature.fill(0);
+
+    lnos::Blob blob = lnos::encode(p, true);
+
+    // Service port 1234 = 0x04D2, should be big endian: 0x04, 0xD2
+    // Layout: version(9) + type(2) + name(12) + svc_count(8) + svc_name(12) + port(2) + pubkey(32) + sig(64)
+    ASSERT_EQ(blob.size(), 141);
+    EXPECT_EQ(blob[blob.size() - SIGNATURE_SIZE - PUBLIC_KEY_SIZE - 2], 0x04) << "port high byte";
+    EXPECT_EQ(blob[blob.size() - SIGNATURE_SIZE - PUBLIC_KEY_SIZE - 1], 0xD2) << "port low byte";
+}
+
+TEST(LnosProtocolTest, EncodeDecodeMaxServices) {
+    std::vector<lnos::Service> services;
+    for (int i = 0; i < 256; ++i) {
+        services.push_back({"s" + std::to_string(i), static_cast<uint16_t>(i)});
+    }
+    lnos::Packet original("max.services.node", services);
+    original.publicKey.fill(0x42);
+    original.signature.fill(0x24);
+
+    lnos::Blob blob = lnos::encode(original, true);
+    lnos::EncodedPacket encoded{blob.data(), blob.size()};
+    lnos::Packet decoded;
+    ASSERT_TRUE(lnos::decode(encoded, decoded));
+    EXPECT_EQ(decoded.announce.services.size(), 256);
+    EXPECT_EQ(decoded.announce.services[0].name, "s0");
+    EXPECT_EQ(decoded.announce.services[0].port, 0);
+    EXPECT_EQ(decoded.announce.services[255].name, "s255");
+    EXPECT_EQ(decoded.announce.services[255].port, 255);
+    EXPECT_EQ(decoded.publicKey, original.publicKey);
+}
+
+TEST(LnosProtocolTest, EncodeDecodeMaxNameLength) {
+    std::string longName(1024, 'x');
+    lnos::Packet original(longName, {});
+    original.publicKey.fill(0);
+    original.signature.fill(0);
+
+    lnos::Blob blob = lnos::encode(original, true);
+    lnos::EncodedPacket encoded{blob.data(), blob.size()};
+    lnos::Packet decoded;
+    ASSERT_TRUE(lnos::decode(encoded, decoded));
+    EXPECT_EQ(decoded.announce.name, longName);
+}
+
+TEST(LnosProtocolTest, ExceedNameLengthLimit) {
+    // Craft packet with name length 1025 (limit is 1024)
+    lnos::Blob custom;
+    lnos::blobPush(custom, std::string("3")); // version
+    lnos::blobPush(custom, (uint16_t)0); // type
+    lnos::blobPush(custom, (uint64_t)1025); // name length 1025
+    // Skip actually writing 1025 bytes — decode should fail at length check
+
+    lnos::EncodedPacket encoded{custom.data(), custom.size()};
+    lnos::Packet decoded;
+    EXPECT_FALSE(lnos::decode(encoded, decoded));
+}
+
+TEST(LnosProtocolTest, TamperServicesFailsVerify) {
+    unsigned char pub[crypto_sign_PUBLICKEYBYTES];
+    unsigned char priv[crypto_sign_SECRETKEYBYTES];
+    crypto_sign_keypair(pub, priv);
+
+    std::array<uint8_t, PUBLIC_KEY_SIZE> publicKey;
+    std::memcpy(publicKey.data(), pub, PUBLIC_KEY_SIZE);
+    std::array<uint8_t, PRIVATE_KEY_SIZE> privateKey;
+    std::memcpy(privateKey.data(), priv, PRIVATE_KEY_SIZE);
+
+    lnos::Packet packet("tamper.service.node", {{"ssh", 22}});
+    packet.publicKey = publicKey;
+    ASSERT_TRUE(lnos::signPacket(packet, privateKey));
+
+    // Tamper with services
+    lnos::Packet tampered = packet;
+    tampered.announce.services[0].port = 2222;
+    EXPECT_FALSE(lnos::verifyPacket(tampered));
+}
+
+TEST(LnosProtocolTest, TamperPublicKeyFailsVerify) {
+    unsigned char pub[crypto_sign_PUBLICKEYBYTES];
+    unsigned char priv[crypto_sign_SECRETKEYBYTES];
+    crypto_sign_keypair(pub, priv);
+
+    std::array<uint8_t, PUBLIC_KEY_SIZE> publicKey;
+    std::memcpy(publicKey.data(), pub, PUBLIC_KEY_SIZE);
+    std::array<uint8_t, PRIVATE_KEY_SIZE> privateKey;
+    std::memcpy(privateKey.data(), priv, PRIVATE_KEY_SIZE);
+
+    lnos::Packet packet("tamper.pubkey.node", {});
+    packet.publicKey = publicKey;
+    ASSERT_TRUE(lnos::signPacket(packet, privateKey));
+
+    // Tamper with public key
+    lnos::Packet tampered = packet;
+    tampered.publicKey[0] ^= 0xFF;
+    EXPECT_FALSE(lnos::verifyPacket(tampered));
+}
+
+TEST(LnosProtocolTest, EncodeDecodeManyServices) {
+    std::vector<lnos::Service> services;
+    for (int i = 0; i < 100; ++i) {
+        services.push_back({"service." + std::to_string(i), static_cast<uint16_t>(i * 100)});
+    }
+    lnos::Packet original("multi.service.node", services);
+    original.publicKey.fill(0x11);
+    original.signature.fill(0x22);
+
+    lnos::Blob blob = lnos::encode(original, true);
+    lnos::EncodedPacket encoded{blob.data(), blob.size()};
+    lnos::Packet decoded;
+    ASSERT_TRUE(lnos::decode(encoded, decoded));
+    ASSERT_EQ(decoded.announce.services.size(), 100);
+    for (int i = 0; i < 100; ++i) {
+        EXPECT_EQ(decoded.announce.services[i].name, "service." + std::to_string(i));
+        EXPECT_EQ(decoded.announce.services[i].port, i * 100);
+    }
+}
+
+TEST(LnosProtocolTest, EncodeDecodeWithoutSignature) {
+    lnos::Packet p("nosig.node", {{"http", 80}});
+    p.publicKey.fill(0x33);
+    p.signature.fill(0xAA);
+
+    // Encode without signature — should be smaller than with signature
+    lnos::Blob blobNoSig = lnos::encode(p, false);
+    lnos::Blob blobWithSig = lnos::encode(p, true);
+    EXPECT_EQ(blobWithSig.size(), blobNoSig.size() + SIGNATURE_SIZE);
+
+    // Decode expects signature always present — must fail without it
+    lnos::EncodedPacket encoded{blobNoSig.data(), blobNoSig.size()};
+    lnos::Packet decoded;
+    EXPECT_FALSE(lnos::decode(encoded, decoded));
+
+    // With signature, decode succeeds
+    lnos::EncodedPacket encoded2{blobWithSig.data(), blobWithSig.size()};
+    EXPECT_TRUE(lnos::decode(encoded2, decoded));
+    EXPECT_EQ(decoded.announce.name, "nosig.node");
+}
+
+TEST(LnosProtocolTest, ZeroLengthBuffer) {
+    lnos::Blob empty;
+    lnos::EncodedPacket encoded{empty.data(), empty.size()};
+    lnos::Packet decoded;
+    EXPECT_FALSE(lnos::decode(encoded, decoded));
+}
+
+TEST(LnosProtocolTest, BlobPushUint64Roundtrip) {
+    lnos::Blob blob;
+    lnos::blobPush(blob, (uint64_t)0x1234567890ABCDEFULL);
+    ASSERT_EQ(blob.size(), 8);
+    // Big endian: first byte should be 0x12
+    EXPECT_EQ(blob[0], 0x12);
+    EXPECT_EQ(blob[7], 0xEF);
+}
+
+TEST(LnosProtocolTest, BlobPushUint16Roundtrip) {
+    lnos::Blob blob;
+    lnos::blobPush(blob, (uint16_t)0xABCD);
+    ASSERT_EQ(blob.size(), 2);
+    EXPECT_EQ(blob[0], 0xAB);
+    EXPECT_EQ(blob[1], 0xCD);
+}
+
+TEST(LnosProtocolTest, ServiceWithSpecialChars) {
+    std::vector<lnos::Service> services = {
+        {"service-name_with.underscores", 8080},
+        {"https", 443}
+    };
+    lnos::Packet original("special.chars.node", services);
+    original.publicKey.fill(0);
+    original.signature.fill(0);
+
+    lnos::Blob blob = lnos::encode(original, true);
+    lnos::EncodedPacket encoded{blob.data(), blob.size()};
+    lnos::Packet decoded;
+    ASSERT_TRUE(lnos::decode(encoded, decoded));
+    EXPECT_EQ(decoded.announce.services[0].name, "service-name_with.underscores");
+    EXPECT_EQ(decoded.announce.services[0].port, 8080);
+    EXPECT_EQ(decoded.announce.services[1].name, "https");
+    EXPECT_EQ(decoded.announce.services[1].port, 443);
 }
