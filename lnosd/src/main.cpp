@@ -6,8 +6,13 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <mutex>
+#include <shared_mutex>
 #include <atomic>
 #include <array>
+#include <vector>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <netdb.h>
 #include <sodium.h>
 
 #include <lnos/crypto.h>
@@ -16,10 +21,106 @@
 #include <lnos/config.h>
 
 #define MCAST_GROUP "239.255.42.99"
+#define MCAST_GROUP_V6 "ff02::4299"
 #define PORT 4545
 
 
 std::atomic<bool> running = true;
+
+struct InterfaceInfo {
+    std::string name;
+    unsigned int index = 0;
+    std::string ipv4;
+    std::string ipv6;
+    bool has_ipv4 = false;
+    bool has_ipv6 = false;
+};
+
+InterfaceInfo detectInterface() {
+    struct ifaddrs* ifaddr = nullptr;
+    if (getifaddrs(&ifaddr) == -1) {
+        return {};
+    }
+
+    // Pass 1: find non-loopback active interfaces
+    for (struct ifaddrs* ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr) continue;
+        if (!(ifa->ifa_flags & IFF_UP) || !(ifa->ifa_flags & IFF_RUNNING)) continue;
+        if (ifa->ifa_flags & IFF_LOOPBACK) continue;
+
+        InterfaceInfo info;
+        info.name = ifa->ifa_name;
+        info.index = if_nametoindex(ifa->ifa_name);
+
+        for (struct ifaddrs* ifa2 = ifaddr; ifa2 != nullptr; ifa2 = ifa2->ifa_next) {
+            if (!ifa2->ifa_addr || std::string(ifa2->ifa_name) != info.name) continue;
+            if (ifa2->ifa_addr->sa_family == AF_INET) {
+                char host[NI_MAXHOST];
+                if (getnameinfo(ifa2->ifa_addr, sizeof(struct sockaddr_in), host, NI_MAXHOST, nullptr, 0, NI_NUMERICHOST) == 0) {
+                    info.ipv4 = host;
+                    info.has_ipv4 = true;
+                }
+            } else if (ifa2->ifa_addr->sa_family == AF_INET6) {
+                char host[NI_MAXHOST];
+                if (getnameinfo(ifa2->ifa_addr, sizeof(struct sockaddr_in6), host, NI_MAXHOST, nullptr, 0, NI_NUMERICHOST) == 0) {
+                    std::string s(host);
+                    auto pos = s.find('%');
+                    if (pos != std::string::npos) {
+                        s = s.substr(0, pos);
+                    }
+                    info.ipv6 = s;
+                    info.has_ipv6 = true;
+                }
+            }
+        }
+
+        if (info.has_ipv4 || info.has_ipv6) {
+            freeifaddrs(ifaddr);
+            return info;
+        }
+    }
+
+    // Pass 2: fallback to loopback
+    for (struct ifaddrs* ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr) continue;
+        if (!(ifa->ifa_flags & IFF_UP) || !(ifa->ifa_flags & IFF_RUNNING)) continue;
+        if (!(ifa->ifa_flags & IFF_LOOPBACK)) continue;
+
+        InterfaceInfo info;
+        info.name = ifa->ifa_name;
+        info.index = if_nametoindex(ifa->ifa_name);
+
+        for (struct ifaddrs* ifa2 = ifaddr; ifa2 != nullptr; ifa2 = ifa2->ifa_next) {
+            if (!ifa2->ifa_addr || std::string(ifa2->ifa_name) != info.name) continue;
+            if (ifa2->ifa_addr->sa_family == AF_INET) {
+                char host[NI_MAXHOST];
+                if (getnameinfo(ifa2->ifa_addr, sizeof(struct sockaddr_in), host, NI_MAXHOST, nullptr, 0, NI_NUMERICHOST) == 0) {
+                    info.ipv4 = host;
+                    info.has_ipv4 = true;
+                }
+            } else if (ifa2->ifa_addr->sa_family == AF_INET6) {
+                char host[NI_MAXHOST];
+                if (getnameinfo(ifa2->ifa_addr, sizeof(struct sockaddr_in6), host, NI_MAXHOST, nullptr, 0, NI_NUMERICHOST) == 0) {
+                    std::string s(host);
+                    auto pos = s.find('%');
+                    if (pos != std::string::npos) {
+                        s = s.substr(0, pos);
+                    }
+                    info.ipv6 = s;
+                    info.has_ipv6 = true;
+                }
+            }
+        }
+
+        if (info.has_ipv4 || info.has_ipv6) {
+            freeifaddrs(ifaddr);
+            return info;
+        }
+    }
+
+    freeifaddrs(ifaddr);
+    return {};
+}
 
 void handleSigint(int) {
     std::cout << "CTRL+C received\n";
@@ -27,7 +128,7 @@ void handleSigint(int) {
 }
 
 std::array<std::uint8_t, PUBLIC_KEY_SIZE> publicKey;
-std::mutex nodesMutex;
+std::shared_mutex nodesMutex;
 std::mutex coutMutex;
 
 lnos::Config cfg;
@@ -46,86 +147,46 @@ void stopAfterSystemError(const char* operation) {
     stopWithError(std::string("Network operation failed: ") + operation);
 }
 
-bool signPacket(lnos::Packet& packet,
-                const std::array<uint8_t, PRIVATE_KEY_SIZE>& privateKey)
-{
-    lnos::Blob data = lnos::encode(packet, true);
 
-    // Важно: кодируем без signature
-
-    unsigned long long signatureLength;
-
-    crypto_sign_detached(
-        packet.signature.data(),
-        &signatureLength,
-        data.data(),
-        data.size(),
-        privateKey.data()
-    );
-
-    return signatureLength == crypto_sign_BYTES;
-}
-
-void sender() {
+void sender_ipv4(std::string myIp) {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
-
     if (sock < 0) {
-        stopAfterSystemError("sender socket");
+        std::cerr << "[error] sender_ipv4: failed to create socket\n";
         return;
     }
 
     unsigned char ttl = 1;
-
-    if (setsockopt(sock,
-                   IPPROTO_IP,
-                   IP_MULTICAST_TTL,
-                   &ttl,
-                   sizeof(ttl)) < 0) {
-        stopAfterSystemError("IP_MULTICAST_TTL");
+    if (setsockopt(sock, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl)) < 0) {
+        std::cerr << "[error] sender_ipv4: IP_MULTICAST_TTL failed\n";
         close(sock);
         return;
     }
 
-    // Разрешаем получать свои же multicast-пакеты
     int loop = 1;
-    if (setsockopt(sock,
-                   IPPROTO_IP,
-                   IP_MULTICAST_LOOP,
-                   &loop,
-                   sizeof(loop)) < 0) {
-        stopAfterSystemError("IP_MULTICAST_LOOP");
+    if (setsockopt(sock, IPPROTO_IP, IP_MULTICAST_LOOP, &loop, sizeof(loop)) < 0) {
+        std::cerr << "[error] sender_ipv4: IP_MULTICAST_LOOP failed\n";
         close(sock);
         return;
     }
 
-    // Указываем интерфейс для multicast
     in_addr localInterface{};
-
-    if (inet_pton(AF_INET,
-                  myIp.c_str(),
-                  &localInterface) != 1) {
-        stopWithError("Invalid local IPv4 address: '" + myIp + "'");
+    if (inet_pton(AF_INET, myIp.c_str(), &localInterface) != 1) {
+        std::cerr << "[error] sender_ipv4: Invalid local IPv4 address '" << myIp << "'\n";
         close(sock);
         return;
     }
 
-    if (setsockopt(sock,
-                   IPPROTO_IP,
-                   IP_MULTICAST_IF,
-                   &localInterface,
-                   sizeof(localInterface)) < 0) {
-        stopAfterSystemError("IP_MULTICAST_IF");
+    if (setsockopt(sock, IPPROTO_IP, IP_MULTICAST_IF, &localInterface, sizeof(localInterface)) < 0) {
+        std::cerr << "[error] sender_ipv4: IP_MULTICAST_IF failed\n";
         close(sock);
         return;
     }
-
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(PORT);
-
     if (inet_pton(AF_INET, MCAST_GROUP, &addr.sin_addr) != 1) {
-        stopWithError("Invalid multicast IPv4 address: '" MCAST_GROUP "'");
+        std::cerr << "[error] sender_ipv4: Invalid multicast address '" << MCAST_GROUP << "'\n";
         close(sock);
         return;
     }
@@ -134,35 +195,25 @@ void sender() {
     auto publicKey = lnos::loadPublicKey();
 
     while (running) {
-
         lnos::Packet p(cfg.name, cfg.services);
-
         p.publicKey = publicKey;
 
-        if (!lnos::signPacket(p, privateKey))
-        {
-            stopWithError("Packet signing failed");
+        if (!lnos::signPacket(p, privateKey)) {
+            std::cerr << "[error] sender_ipv4: Packet signing failed\n";
             break;
         }
-
 
         lnos::Blob msg = lnos::encode(p, true);
 
-        std::cout << "[debug] sending "
-                  << msg.size()
-                  << " bytes\n";
-
-
-        if (sendto(sock,
-                   msg.data(),
-                   msg.size(),
-                   0,
-                   reinterpret_cast<sockaddr*>(&addr),
-                   sizeof(addr)) < 0) {
-            stopAfterSystemError("sendto");
-            break;
+        {
+            std::lock_guard<std::mutex> lock(coutMutex);
+            std::cout << "[debug] sender_ipv4: sending " << msg.size() << " bytes\n";
         }
 
+        if (sendto(sock, msg.data(), msg.size(), 0, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+            std::cerr << "[error] sender_ipv4: sendto failed\n";
+            break;
+        }
 
         std::this_thread::sleep_for(std::chrono::seconds(2));
     }
@@ -170,156 +221,281 @@ void sender() {
     close(sock);
 }
 
-void receiver() {
+void receiver_ipv4(std::string myIp) {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
-
     if (sock < 0) {
-        stopAfterSystemError("receiver socket");
+        std::cerr << "[error] receiver_ipv4: failed to create socket\n";
         return;
     }
 
     int reuse = 1;
-
-    if (setsockopt(sock,
-                   SOL_SOCKET,
-                   SO_REUSEADDR,
-                   &reuse,
-                   sizeof(reuse)) < 0) {
-        stopAfterSystemError("SO_REUSEADDR");
+    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
+        std::cerr << "[error] receiver_ipv4: SO_REUSEADDR failed\n";
         close(sock);
         return;
     }
-
 
     timeval tv{};
     tv.tv_sec = 1;
     tv.tv_usec = 0;
-
-    if (setsockopt(sock,
-                   SOL_SOCKET,
-                   SO_RCVTIMEO,
-                   &tv,
-                   sizeof(tv)) < 0) {
-        stopAfterSystemError("SO_RCVTIMEO");
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+        std::cerr << "[error] receiver_ipv4: SO_RCVTIMEO failed\n";
         close(sock);
         return;
     }
-
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(PORT);
     addr.sin_addr.s_addr = INADDR_ANY;
 
-
-    if (bind(sock,
-             reinterpret_cast<sockaddr*>(&addr),
-             sizeof(addr)) < 0) {
-
-        stopAfterSystemError("bind");
+    if (bind(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        std::cerr << "[error] receiver_ipv4: bind failed\n";
         close(sock);
         return;
     }
-
 
     ip_mreq mreq{};
-
-
-    // multicast адрес
-    if (inet_pton(AF_INET,
-                  MCAST_GROUP,
-                  &mreq.imr_multiaddr) != 1) {
-        stopWithError("Invalid multicast IPv4 address: '" MCAST_GROUP "'");
+    if (inet_pton(AF_INET, MCAST_GROUP, &mreq.imr_multiaddr) != 1) {
+        std::cerr << "[error] receiver_ipv4: Invalid multicast address\n";
         close(sock);
         return;
     }
 
-    // интерфейс
     if (inet_pton(AF_INET, myIp.c_str(), &mreq.imr_interface) != 1) {
-        stopWithError("Invalid local IPv4 address: '" + myIp + "'");
+        std::cerr << "[error] receiver_ipv4: Invalid local address\n";
         close(sock);
         return;
     }
 
-
-    if (setsockopt(sock,
-                   IPPROTO_IP,
-                   IP_ADD_MEMBERSHIP,
-                   &mreq,
-                   sizeof(mreq)) < 0) {
-
-        stopAfterSystemError("IP_ADD_MEMBERSHIP");
+    if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+        std::cerr << "[error] receiver_ipv4: IP_ADD_MEMBERSHIP failed\n";
         close(sock);
         return;
     }
-
 
     char buffer[1024];
 
     while (running) {
-
         sockaddr_in senderAddr{};
         socklen_t senderLen = sizeof(senderAddr);
 
-
-        ssize_t len = recvfrom(sock,
-                               buffer,
-                               sizeof(buffer) - 1,
-                               0,
-                               reinterpret_cast<sockaddr*>(&senderAddr),
-                               &senderLen);
-
+        ssize_t len = recvfrom(sock, buffer, sizeof(buffer) - 1, 0, reinterpret_cast<sockaddr*>(&senderAddr), &senderLen);
         if (len < 0) {
             if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-                stopAfterSystemError("recvfrom");
+                std::cerr << "[error] receiver_ipv4: recvfrom failed\n";
                 break;
             }
             continue;
         }
 
-        if (len == 0)
-            continue;
-
+        if (len == 0) continue;
 
         buffer[len] = 0;
 
-
         char ip[INET_ADDRSTRLEN];
-
-        if (inet_ntop(AF_INET,
-                      &senderAddr.sin_addr,
-                      ip,
-                      sizeof(ip)) == nullptr) {
-            stopAfterSystemError("inet_ntop");
+        if (inet_ntop(AF_INET, &senderAddr.sin_addr, ip, sizeof(ip)) == nullptr) {
+            std::cerr << "[error] receiver_ipv4: inet_ntop failed\n";
             break;
         }
 
-
-        std::cout << "[debug] received "
-                  << len
-                  << " bytes from "
-                  << ip
-                  << "\n";
-
+        {
+            std::lock_guard<std::mutex> lock(coutMutex);
+            std::cout << "[debug] receiver_ipv4: received " << len << " bytes from " << ip << "\n";
+        }
 
         lnos::EncodedPacket encoded((uint8_t *) buffer, len);
         lnos::Packet p;
         if (lnos::decode(encoded, p)) {
-            std::lock_guard<std::mutex> lock(nodesMutex);
+            if (!lnos::verifyPacket(p)) {
+                std::cerr << "[error] receiver_ipv4: packet signature verification failed\n";
+                continue;
+            }
+            std::unique_lock<std::shared_mutex> lock(nodesMutex);
             if (p.type == lnos::PacketType::Announce) {
-                nodes[p.as.announce.name] = {
-                    p.as.announce.name,
+                const auto& announce = std::get<lnos::PacketAnnounce>(p.as);
+                nodes[announce.name] = {
+                    announce.name,
                     ip,
-                    p.as.announce.services,
+                    announce.services,
                     std::chrono::steady_clock::now(),
                     NodeStatus::Online
                 };
             }
         } else {
-            std::cerr << "[error] received invalid packet\n";
+            std::cerr << "[error] receiver_ipv4: received invalid packet\n";
         }
     }
 
+    close(sock);
+}
+
+void sender_ipv6(std::string myIp, unsigned int ifindex) {
+    int sock = socket(AF_INET6, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        std::cerr << "[error] sender_ipv6: failed to create socket\n";
+        return;
+    }
+
+    int hops = 1;
+    if (setsockopt(sock, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &hops, sizeof(hops)) < 0) {
+        std::cerr << "[error] sender_ipv6: IPV6_MULTICAST_HOPS failed\n";
+        close(sock);
+        return;
+    }
+
+    int loop = 1;
+    if (setsockopt(sock, IPPROTO_IPV6, IPV6_MULTICAST_LOOP, &loop, sizeof(loop)) < 0) {
+        std::cerr << "[error] sender_ipv6: IPV6_MULTICAST_LOOP failed\n";
+        close(sock);
+        return;
+    }
+
+    if (setsockopt(sock, IPPROTO_IPV6, IPV6_MULTICAST_IF, &ifindex, sizeof(ifindex)) < 0) {
+        std::cerr << "[error] sender_ipv6: IPV6_MULTICAST_IF failed\n";
+        close(sock);
+        return;
+    }
+
+    sockaddr_in6 addr{};
+    addr.sin6_family = AF_INET6;
+    addr.sin6_port = htons(PORT);
+    if (inet_pton(AF_INET6, MCAST_GROUP_V6, &addr.sin6_addr) != 1) {
+        std::cerr << "[error] sender_ipv6: Invalid multicast address '" << MCAST_GROUP_V6 << "'\n";
+        close(sock);
+        return;
+    }
+
+    auto privateKey = lnos::loadPrivateKey();
+    auto publicKey = lnos::loadPublicKey();
+
+    while (running) {
+        lnos::Packet p(cfg.name, cfg.services);
+        p.publicKey = publicKey;
+
+        if (!lnos::signPacket(p, privateKey)) {
+            std::cerr << "[error] sender_ipv6: Packet signing failed\n";
+            break;
+        }
+
+        lnos::Blob msg = lnos::encode(p, true);
+
+        {
+            std::lock_guard<std::mutex> lock(coutMutex);
+            std::cout << "[debug] sender_ipv6: sending " << msg.size() << " bytes\n";
+        }
+
+        if (sendto(sock, msg.data(), msg.size(), 0, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+            std::cerr << "[error] sender_ipv6: sendto failed\n";
+            break;
+        }
+
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+    }
+
+    close(sock);
+}
+
+void receiver_ipv6(unsigned int ifindex) {
+    int sock = socket(AF_INET6, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        std::cerr << "[error] receiver_ipv6: failed to create socket\n";
+        return;
+    }
+
+    int reuse = 1;
+    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
+        std::cerr << "[error] receiver_ipv6: SO_REUSEADDR failed\n";
+        close(sock);
+        return;
+    }
+
+    timeval tv{};
+    tv.tv_sec = 1;
+    tv.tv_usec = 0;
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+        std::cerr << "[error] receiver_ipv6: SO_RCVTIMEO failed\n";
+        close(sock);
+        return;
+    }
+
+    sockaddr_in6 addr{};
+    addr.sin6_family = AF_INET6;
+    addr.sin6_port = htons(PORT);
+    addr.sin6_addr = in6addr_any;
+
+    if (bind(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        std::cerr << "[error] receiver_ipv6: bind failed\n";
+        close(sock);
+        return;
+    }
+
+    ipv6_mreq mreq{};
+    if (inet_pton(AF_INET6, MCAST_GROUP_V6, &mreq.ipv6mr_multiaddr) != 1) {
+        std::cerr << "[error] receiver_ipv6: Invalid multicast address\n";
+        close(sock);
+        return;
+    }
+    mreq.ipv6mr_interface = ifindex;
+
+    if (setsockopt(sock, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+        std::cerr << "[error] receiver_ipv6: IPV6_ADD_MEMBERSHIP failed\n";
+        close(sock);
+        return;
+    }
+
+    char buffer[1024];
+
+    while (running) {
+        sockaddr_in6 senderAddr{};
+        socklen_t senderLen = sizeof(senderAddr);
+
+        ssize_t len = recvfrom(sock, buffer, sizeof(buffer) - 1, 0, reinterpret_cast<sockaddr*>(&senderAddr), &senderLen);
+        if (len < 0) {
+            if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+                std::cerr << "[error] receiver_ipv6: recvfrom failed\n";
+                break;
+            }
+            continue;
+        }
+
+        if (len == 0) continue;
+
+        buffer[len] = 0;
+
+        char ip[INET6_ADDRSTRLEN];
+        if (inet_ntop(AF_INET6, &senderAddr.sin6_addr, ip, sizeof(ip)) == nullptr) {
+            std::cerr << "[error] receiver_ipv6: inet_ntop failed\n";
+            break;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(coutMutex);
+            std::cout << "[debug] receiver_ipv6: received " << len << " bytes from " << ip << "\n";
+        }
+
+        lnos::EncodedPacket encoded((uint8_t *) buffer, len);
+        lnos::Packet p;
+        if (lnos::decode(encoded, p)) {
+            if (!lnos::verifyPacket(p)) {
+                std::cerr << "[error] receiver_ipv6: packet signature verification failed\n";
+                continue;
+            }
+            std::unique_lock<std::shared_mutex> lock(nodesMutex);
+            if (p.type == lnos::PacketType::Announce) {
+                const auto& announce = std::get<lnos::PacketAnnounce>(p.as);
+                nodes[announce.name] = {
+                    announce.name,
+                    ip,
+                    announce.services,
+                    std::chrono::steady_clock::now(),
+                    NodeStatus::Online
+                };
+            }
+        } else {
+            std::cerr << "[error] receiver_ipv6: received invalid packet\n";
+        }
+    }
 
     close(sock);
 }
@@ -328,7 +504,7 @@ void printer() {
     while (running) {
 
         {
-            std::lock_guard<std::mutex> lock(nodesMutex);
+            std::shared_lock<std::shared_mutex> lock(nodesMutex);
 
             // std::cout << "\033[2J\033[H";
             std::cout << "=== LNOS NODES ===" << std::endl;
@@ -370,7 +546,7 @@ void cleanup() {
     while (running) {
 
         {
-            std::lock_guard<std::mutex> lock(nodesMutex);
+            std::unique_lock<std::shared_mutex> lock(nodesMutex);
 
             for (auto& n : nodes) {
                 if (std::chrono::steady_clock::now() - n.second.lastSeen
@@ -392,14 +568,36 @@ int main() {
     cfg = lnos::loadConfig();
     std::cout << "My name: " << cfg.name << "\n";
 
-    std::thread t1(sender);
-    std::thread t2(receiver);
-    std::thread t3(printer);
-    std::thread t4(cleanup);
+    InterfaceInfo info = detectInterface();
+    std::cout << "Detected interface: " << info.name << " (index: " << info.index << ")\n";
+    if (info.has_ipv4) {
+        std::cout << "  IPv4: " << info.ipv4 << "\n";
+    }
+    if (info.has_ipv6) {
+        std::cout << "  IPv6: " << info.ipv6 << "\n";
+    }
 
-    t1.join();
-    t2.join();
-    t3.join();
-    t4.join();
+    if (!info.has_ipv4 && !info.has_ipv6) {
+        stopWithError("No active network interfaces with IPv4 or IPv6 found.");
+        return 1;
+    }
+
+    std::vector<std::thread> threads;
+    if (info.has_ipv4) {
+        threads.emplace_back(sender_ipv4, info.ipv4);
+        threads.emplace_back(receiver_ipv4, info.ipv4);
+    }
+    if (info.has_ipv6) {
+        threads.emplace_back(sender_ipv6, info.ipv6, info.index);
+        threads.emplace_back(receiver_ipv6, info.index);
+    }
+    threads.emplace_back(printer);
+    threads.emplace_back(cleanup);
+
+    for (auto& t : threads) {
+        if (t.joinable()) {
+            t.join();
+        }
+    }
     std::cout << "LNOS is stopped." << std::endl;
 }

@@ -18,4 +18,6 @@ namespace lnos {
         const std::array<uint8_t, PRIVATE_KEY_SIZE>& privateKey
     );
 
+    bool verifyPacket(const Packet& packet);
+
 }

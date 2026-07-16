@@ -4,6 +4,7 @@
 #include <vector>
 #include <cstdint>
 #include <cstring>
+#include <variant>
 
 constexpr std::size_t PUBLIC_KEY_SIZE = 32;
 constexpr std::size_t PRIVATE_KEY_SIZE = 64;
@@ -48,12 +49,7 @@ namespace lnos {
         {}
     };
 
-    union PacketAs {
-      PacketAnnounce announce;
-
-      ~PacketAs()
-      {}
-    };
+    using PacketAs = std::variant<PacketAnnounce>;
 
     struct Packet {
         std::string version;
@@ -159,12 +155,13 @@ namespace lnos {
 
         switch (p.type) {
         case PacketType::Announce: {
-          blobPush(blob, p.as.announce.name);
+          const auto& announce = std::get<PacketAnnounce>(p.as);
+          blobPush(blob, announce.name);
 
-          uint64_t len = p.as.announce.services.size();
+          uint64_t len = announce.services.size();
           blobPush(blob, len);
 
-          for (const auto& s : p.as.announce.services)
+          for (const auto& s : announce.services)
           {
             blobPush(blob, s.name);
             blobPush(blob, s.port);
@@ -193,18 +190,20 @@ namespace lnos {
 
         switch (result.type) {
         case PacketType::Announce: {
-          encodedPacketConsume(packet, result.as.announce.name);
+          result.as = PacketAnnounce({}, {});
+          auto& announce = std::get<PacketAnnounce>(result.as);
+          encodedPacketConsume(packet, announce.name);
 
           uint64_t len = 0;
           encodedPacketConsume(packet, len);
-          result.as.announce.services.reserve(len);
+          announce.services.reserve(len);
 
           for (uint64_t i = 0; i < len; ++i)
           {
             Service service;
             encodedPacketConsume(packet, service.name);
             encodedPacketConsume(packet, service.port);
-            result.as.announce.services.push_back(service);
+            announce.services.push_back(service);
           }
         } break;
         }
