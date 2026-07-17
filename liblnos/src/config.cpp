@@ -2,6 +2,7 @@
 #include <sstream>
 #include <cstdlib>
 #include <filesystem>
+#include <sys/stat.h>
 #include <lnos/config.h>
 #include <unistd.h>
 
@@ -11,6 +12,10 @@ namespace lnos {
         const char* xdg = std::getenv("XDG_CONFIG_HOME");
         if (xdg && *xdg) {
             return std::string(xdg) + "/lnos";
+        }
+        struct stat st;
+        if (geteuid() != 0 && stat("/etc/lnos", &st) == 0 && S_ISDIR(st.st_mode)) {
+            return "/etc/lnos";
         }
         if (geteuid() == 0) {
             return "/etc/lnos";
