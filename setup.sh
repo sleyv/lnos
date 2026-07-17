@@ -5,7 +5,7 @@ LNOS_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="${LNOS_DIR}/build"
 
 # Try to make stdin interactive (curl | bash compat)
-(exec < /dev/tty) 2>/dev/null || true
+exec < /dev/tty 2>/dev/null || true
 
 # ----- colors -----
 BOLD='\e[1m'
@@ -51,11 +51,11 @@ prompt() {
 
 # ----- banner -----
 echo -e ""
-echo -e " ${MAGENTA} __    _   ______  _____${NC}"
-echo -e " ${MAGENTA}/ /   / | / / __ \/ ___/${NC}"
-echo -e " ${MAGENTA}/ /   /  |/ / / / /\__ \ ${NC}"
-echo -e " ${MAGENTA}/ /___/ /|  / /_/ /___/ / ${NC}"
-echo -e " ${MAGENTA}/_____/_/ |_/\____//____/ ${NC}"
+echo -e " ${MAGENTA} _      _   _    ____    ____ ${NC}"
+echo -e " ${MAGENTA}| |    | \\ | |  / __ \\  / ___|${NC}"
+echo -e " ${MAGENTA}| |    |  \\| | | |  | | \\___ \\ ${NC}"
+echo -e " ${MAGENTA}| |___ | |\\  | | |__| |  ___) |${NC}"
+echo -e " ${MAGENTA}|_____||_| \\_|  \\____/  |____/ ${NC}"
 echo -e " ${GREEN}Local Network Overlay System${NC}"
 echo -e " ${CYAN}encrypted peer discovery & name resolution${NC}"
 echo -e ""
@@ -180,9 +180,9 @@ if [ -f "${CFG_DIR}/public.key" ]; then
     info "Keys already exist, keeping them"
 else
     info "Generating Ed25519 keys..."
-    $AS_USER "$BUILD_DIR/lnosctl" generatekeys 2>/dev/null
+    $SUDO "$BUILD_DIR/lnosctl" generatekeys
 fi
-$AS_USER "$BUILD_DIR/lnosctl" init 2>/dev/null
+$SUDO "$BUILD_DIR/lnosctl" init
 info "  Keys stored in ${CFG_DIR}"
 
 # ----- running daemon check -----
@@ -238,7 +238,7 @@ check_name_free() {
 
 start_temp_daemon() {
     info "Starting temporary daemon for collision check..."
-    "$BUILD_DIR/lnosd" > /dev/null 2>&1 &
+    $SUDO "$BUILD_DIR/lnosd" > /dev/null 2>&1 &
     DAEMON_PID=$!
     SOCKET_PATH="${CFG_DIR}/lnosd.sock"
     for i in 1 2 3 4 5 6 7 8 9 10; do
@@ -254,8 +254,11 @@ start_temp_daemon() {
 
 stop_temp_daemon() {
     if [ -n "$DAEMON_PID" ]; then
-        kill "$DAEMON_PID" 2>/dev/null
-        wait "$DAEMON_PID" 2>/dev/null
+        $SUDO kill "$DAEMON_PID" 2>/dev/null
+        for i in 1 2 3 4 5; do
+            $SUDO kill -0 "$DAEMON_PID" 2>/dev/null || break
+            sleep 0.2
+        done
         unset DAEMON_PID
     fi
 }
@@ -327,7 +330,7 @@ while [ -z "$NODE_NAME" ]; do
     fi
 done
 
-$AS_USER "$BUILD_DIR/lnosctl" set name "$NODE_NAME"
+$SUDO "$BUILD_DIR/lnosctl" set name "$NODE_NAME"
 info "Node name set to ${GREEN}${NODE_NAME}${NC}"
 
 # ----- systemd / OpenRC -----
@@ -397,9 +400,10 @@ else
 fi
 
 # ----- seed owners.db -----
-echo "$NODE_NAME" > "${CFG_DIR}/owners.db" 2>/dev/null || true
-chmod 644 "${CFG_DIR}/owners.db" 2>/dev/null || true
-$SUDO chown root:root "${CFG_DIR}/owners.db" 2>/dev/null || true
+NODE_OWNER="${NODE_NAME##*.}"
+echo "$NODE_OWNER" | $SUDO tee "${CFG_DIR}/owners.db" >/dev/null
+$SUDO chmod 644 "${CFG_DIR}/owners.db"
+$SUDO chown root:root "${CFG_DIR}/owners.db"
 
 # ----- restart if needed -----
 if [ "${DAEMON_RESTART_AFTER}" = "true" ]; then
