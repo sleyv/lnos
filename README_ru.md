@@ -56,7 +56,18 @@
 
 ### 🚀 Быстрый старт
 
-#### 1. Клонирование и сборка
+<table align="center"><tr><td>
+<h3 align="center">⚡ Установка в одну команду</h3>
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/sleyv/lnos/master/scripts/install.sh)"
+```
+
+Скачивает репозиторий, собирает, генерирует ключи, выбирает имя узла, устанавливает демон + NSS-модуль и создаёт systemd-сервис — всё одной командой.
+
+</td></tr></table>
+
+#### 1. Клонирование и сборка (или используй однострочник выше)
 
 ```bash
 git clone https://github.com/sleyv/lnos.git ~/lnos
@@ -68,7 +79,7 @@ cmake --build build -j$(nproc)
 #### 2. Запуск установки
 
 ```bash
-sudo ./setup.sh
+./setup.sh
 ```
 
 Скрипт установит зависимости, настроит имя узла, сгенерирует Ed25519 ключи, установит NSS-модуль и создаст systemd-сервис.

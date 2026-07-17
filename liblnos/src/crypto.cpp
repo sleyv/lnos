@@ -171,33 +171,18 @@ namespace lnos {
             return false;
         }
 
-        // Decode the decrypted payload back into packet
-        EncodedPacket enc{decrypted.data(), decrypted.size()};
-        Packet temp;
-        // The raw payload was encoded using encode(inner, false) -> it does not have the signature at the end, but decode() expects signature.
-        // Wait, let's look at decode(). decode() expects the signature at the end.
-        // Let's modify decode() or we can append a dummy signature to the decrypted payload to satisfy decode().
-        // Yes, let's just append the original signature to decrypted payload, or write a dedicated decodeInner() that doesn't consume signature?
-        // Actually, appending the original signature + sender's public key (32 + 64 bytes) is super simple and robust.
-        // Wait, encode(inner, false) encodes everything EXCEPT the signature.
-        // Wait, encode(inner, false) encodes: version, type, isEncrypted, inner_fields, publicKey.
-        // Ah! encode(inner, false) DOES encode the publicKey, but not the signature.
-        // Let's verify:
-        // blobPush(blob, p.publicKey);
-        // if (includeSignature) blobPush(blob, p.signature);
-        // Yes! So encode(inner, false) has publicKey but not signature.
-        // But decode expects: encodedPacketConsume(packet, result.publicKey); encodedPacketConsume(packet, result.signature);
-        // So we can just append SIGNATURE_SIZE (64) bytes of zero or original signature to decrypted payload, then call decode()!
+        // decode() expects a signature at the end, but inner payload was
+        // encoded with includeSignature=false. Append original signature.
         size_t orig_size = decrypted.size();
         decrypted.resize(orig_size + SIGNATURE_SIZE);
         std::memcpy(decrypted.data() + orig_size, packet.signature.data(), SIGNATURE_SIZE);
 
         EncodedPacket encFull{decrypted.data(), decrypted.size()};
+        Packet temp;
         if (!decode(encFull, temp)) {
             return false;
         }
 
-        // Copy decoded fields back to packet
         packet.announce = std::move(temp.announce);
         packet.gossipNodes = std::move(temp.gossipNodes);
         packet.isEncrypted = 0;

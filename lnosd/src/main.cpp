@@ -1051,33 +1051,6 @@ public:
         }
     }
 
-    void runPrinter() {
-        while (running) {
-            {
-                std::shared_lock<std::shared_mutex> lock(nodesMutex);
-                std::cout << "=== LNOS NODES ===" << std::endl;
-                for (const auto& n : nodes) {
-                    auto seconds = std::chrono::duration_cast<std::chrono::seconds>
-                    (std::chrono::steady_clock::now() - n.second.lastSeen).count();
-
-                    std::cout << n.second.name
-                              << " - " << n.second.ip
-                              << " Status: "
-                              << (n.second.status == NodeStatus::Online ? "Online" : "Offline");
-                    if (n.second.status == NodeStatus::Offline) {
-                        std::cout << "(" << seconds << " seconds ago)";
-                    }
-                    std::cout << std::endl;
-                    std::cout << "Services:\n";
-                    for (const auto& s : n.second.services) {
-                        std::cout << "  " << s.name << ":" << s.port << '\n';
-                    }
-                }
-            }
-            std::this_thread::sleep_for(std::chrono::seconds(10));
-        }
-    }
-
     void runCleanup() {
         while (running) {
             bool changed = false;
@@ -1107,7 +1080,6 @@ public:
 Daemon* g_daemon = nullptr;
 
 void handleSigint(int) {
-    std::cout << "CTRL+C received\n";
     if (g_daemon) {
         g_daemon->running = false;
     }
@@ -1195,7 +1167,6 @@ int main() {
         threads.emplace_back(&Daemon::runQueryServer, &daemon);
         threads.emplace_back(&Daemon::runGossip, &daemon);
         threads.emplace_back(&Daemon::runHttpServer, &daemon);
-        threads.emplace_back(&Daemon::runPrinter, &daemon);
         threads.emplace_back(&Daemon::runCleanup, &daemon);
 
         for (auto& t : threads) {

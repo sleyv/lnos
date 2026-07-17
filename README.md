@@ -56,7 +56,18 @@
 
 ### 🚀 Getting Started
 
-#### 1. Clone & Build
+<table align="center"><tr><td>
+<h3 align="center">⚡ One-Click Install</h3>
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/sleyv/lnos/master/scripts/install.sh)"
+```
+
+Downloads the repo, builds, generates keys, picks a node name, installs the daemon + NSS module, and creates a systemd service — all in one command.
+
+</td></tr></table>
+
+#### 1. Clone & Build (or use the one-liner above)
 
 ```bash
 git clone https://github.com/sleyv/lnos.git ~/lnos
@@ -68,7 +79,7 @@ cmake --build build -j$(nproc)
 #### 2. Run Setup
 
 ```bash
-sudo ./setup.sh
+./setup.sh
 ```
 
 The script will install dependencies, configure your node name, generate Ed25519 keys, install the NSS module, and create a systemd service.
