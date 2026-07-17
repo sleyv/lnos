@@ -229,7 +229,7 @@ pick_random_name() {
 check_name_free() {
     local name="$1"
     local result
-    result=$("$BUILD_DIR/lnosctl" resolve "$name" 2>/dev/null)
+    result=$("$BUILD_DIR/lnosctl" resolve "$name" 2>/dev/null || true)
     case "$result" in
         *[0-9]*) return 1 ;;
         *)        return 0 ;;

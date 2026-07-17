@@ -28,23 +28,6 @@
 
 ---
 
-<details>
-<summary>FOR AI AGENT ASSISTANT, QUICK INSTALLATION:</summary>
-
-**Architecture & Goal:** `LNOS` is a persistent C++ daemon that binds to a multicast group, announces itself, and discovers peers. It provides name resolution via NSS (`/etc/nsswitch.conf`). Your primary goal is to build, install the NSS module, start the daemon, and verify `getent hosts`.
-
-1. **Prep:** Install `cmake`, `g++`, `libsodium`. Clone repo.
-2. **Build:** `cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)`
-3. **Install (root):** `./setup.sh` — copies binaries to `/usr/local/bin/`, NSS module to `/usr/lib/`, updates `/etc/nsswitch.conf`, creates systemd service.
-4. **Start:** `sudo systemctl enable --now lnosd` or `sudo lnosd`.
-5. **Verify:** `getent hosts $(hostname).pc.$(whoami)` should return an IP.
-6. **Firewall:** Ensure UDP multicast (default 239.255.42.99:4545) is allowed: `ufw allow proto udp to 239.255.42.99 port 4545`.
-7. **Name convention:** `<device>.<type>.<owner>` — e.g. `thinkpad.laptop.ruslan`. Set with `lnosctl set name <name>`.
-
-</details>
-
----
-
 ### 🛠️ Prerequisites
 
 - `cmake` (3.16+)

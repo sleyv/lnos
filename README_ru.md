@@ -28,23 +28,6 @@
 
 ---
 
-<details>
-<summary>ДЛЯ AI АГЕНТА, БЫСТРАЯ УСТАНОВКА:</summary>
-
-**Архитектура:** `LNOS` — C++ демон, который слушает multicast группу, анонсирует себя и обнаруживает пиров. Резолвинг имён через NSS (`/etc/nsswitch.conf`).
-
-1. **Зависимости:** `cmake`, `g++`, `libsodium`. Клонировать репозиторий.
-2. **Сборка:** `cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)`
-3. **Установка (root):** `./setup.sh` — копирует бинарники в `/usr/local/bin/`, NSS-модуль в `/usr/lib/`, правит `/etc/nsswitch.conf`, создаёт systemd-сервис.
-4. **Запуск:** `sudo systemctl enable --now lnosd` или `sudo lnosd`.
-5. **Проверка:** `getent hosts $(hostname).pc.$(whoami)` — должен вернуть IP.
-6. **Фаервол:** Разрешить UDP multicast (дефолт 239.255.42.99:4545): `ufw allow proto udp to 239.255.42.99 port 4545`.
-7. **Имя узла:** `<device>.<type>.<owner>`, например `thinkpad.laptop.ruslan`. Задаётся через `lnosctl set name <name>`.
-
-</details>
-
----
-
 ### 🛠️ Требования
 
 - `cmake` (3.16+)
