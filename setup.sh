@@ -4,24 +4,71 @@ set -e
 LNOS_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="${LNOS_DIR}/build"
 
-info()  { echo -e "\e[1;32m[INFO]\e[0m $*"; }
-warn()  { echo -e "\e[1;33m[WARN]\e[0m $*"; }
-err()   { echo -e "\e[1;31m[ERRO]\e[0m $*" >&2; }
+# ----- colors -----
+BOLD='\e[1m'
+DIM='\e[2m'
+GREEN='\e[1;32m'
+CYAN='\e[1;36m'
+YELLOW='\e[1;33m'
+RED='\e[1;31m'
+MAGENTA='\e[1;35m'
+NC='\e[0m'
+UL='\e[4m'
 
-# Sudo handling:
-#   If run via sudo (root), user parts run as $SUDO_USER
-#   If run as normal user, sudo is used only for root parts
+info()  { echo -e " ${GREEN}◆${NC} $*"; }
+warn()  { echo -e " ${YELLOW}⚠${NC} $*"; }
+err()   { echo -e " ${RED}✗${NC} $*" >&2; }
+header(){ echo -e "\n ${BOLD}${CYAN}── $* ──${NC}\n"; }
+box()   { local lines=()
+          while IFS= read -r line; do lines+=("$line"); done
+          echo -e "${DIM}┌─────────────────────────────────────────────────────────────┐${NC}"
+          for line in "${lines[@]}"; do
+            local plain; plain=$(echo -e "$line" | sed 's/\x1b\[[0-9;]*m//g')
+            local len=${#plain}
+            local pad=$((59 - len)); [ "$pad" -lt 0 ] && pad=0
+            printf "${DIM}│${NC} "
+            echo -en "$(echo -e "$line")"
+            printf "%${pad}s ${DIM}│${NC}\n" ""
+          done
+          echo -e "${DIM}└─────────────────────────────────────────────────────────────┘${NC}"; }
+
+# ----- banner -----
+echo -e ""
+echo -e " ${MAGENTA}╔═══════════════════════════════════════════════════════════╗${NC}"
+echo -e " ${MAGENTA}║${NC}  ${BOLD}LNOS${NC} — ${BOLD}L${NC}ocal ${BOLD}N${NC}etwork ${BOLD}O${NC}verlay ${BOLD}S${NC}ystem              ${MAGENTA}║${NC}"
+echo -e " ${MAGENTA}║${NC}  encrypted peer discovery & name resolution          ${MAGENTA}║${NC}"
+echo -e " ${MAGENTA}╚═══════════════════════════════════════════════════════════╝${NC}"
+echo -e ""
+
+# ----- root check -----
 if [ "$(id -u)" -eq 0 ]; then
-    AS_USER="sudo -u ${SUDO_USER:-$(whoami)}"
-    SUDO=""
+    if [ -z "$SUDO_USER" ]; then
+        echo -e " ${YELLOW}⚠${NC} You are running as ${BOLD}root${NC} (not via sudo)."
+        echo -e "   This will install configs owned by root."
+        echo -e "   If you want configs owned by your user, run with ${BOLD}sudo${NC} as a regular user."
+        echo -e ""
+        read -r -p "  Continue as root? [y/N]: " ans
+        case "$ans" in [yY]|[yY][eE][sS]) ;; *) echo "  Exiting."; exit 1 ;; esac
+        AS_USER=""
+        SUDO=""
+    else
+        AS_USER="sudo -u ${SUDO_USER}"
+        SUDO=""
+    fi
 else
     AS_USER=""
     SUDO="sudo"
 fi
 
-info "=== LNOS setup ==="
+# ----- whoami for hostname-based name -----
+if [ -n "$SUDO_USER" ]; then
+    WHOAMI="$SUDO_USER"
+else
+    WHOAMI="$(whoami)"
+fi
 
-# ----- deps -----
+header "Dependencies"
+
 PM=""
 APT_DEPS="cmake g++ make libsodium-dev"
 PAC_DEPS="cmake gcc make libsodium"
@@ -47,7 +94,7 @@ if ! ldconfig -p 2>/dev/null | grep -q libsodium && ! pkg-config --exists libsod
 fi
 
 if [ -n "$MISSING" ]; then
-    info "Installing dependencies:$MISSING"
+    info "Installing:$MISSING"
     case "$PM" in
         apt-get) [ "$(id -u)" -eq 0 ] && apt-get update -qq && apt-get install -y -qq $APT_DEPS || warn "run as root: apt-get install $APT_DEPS" ;;
         pacman)  pacman -S --noconfirm $PAC_DEPS ;;
@@ -57,12 +104,16 @@ if [ -n "$MISSING" ]; then
         apk)     apk add $APK_DEPS ;;
         *)       warn "Unknown package manager. Install: cmake, g++, libsodium-dev" ;;
     esac
+else
+    info "All dependencies satisfied"
 fi
 
-# ----- build -----
+header "Build"
+
 info "Building LNOS..."
 cmake -S "$LNOS_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
 cmake --build "$BUILD_DIR" -j"$(nproc)"
+info "Build complete"
 
 # ----- determine lib dir -----
 for d in /usr/lib64 /usr/lib /lib64 /lib; do
@@ -73,40 +124,75 @@ for d in /usr/lib64 /usr/lib /lib64 /lib; do
 done
 [ -n "$LIBDIR" ] || LIBDIR="/usr/lib"
 
-# ----- install binaries -----
-info "Installing binaries (may need sudo)..."
+header "Install"
+
+info "Installing binaries..."
 $SUDO install -m 755 "$BUILD_DIR/lnosd" /usr/local/bin/lnosd
 $SUDO install -m 755 "$BUILD_DIR/lnosctl" /usr/local/bin/lnosctl
-info "Binaries → /usr/local/bin/lnosd, /usr/local/bin/lnosctl"
+info "  lnosd   → /usr/local/bin/lnosd"
+info "  lnosctl → /usr/local/bin/lnosctl"
 
-# ----- install NSS module -----
 $SUDO cp "$BUILD_DIR/libnss_lnos.so.2" "$LIBDIR/"
 $SUDO ldconfig
-info "NSS module → $LIBDIR/libnss_lnos.so.2"
+info "  NSS     → ${LIBDIR}/libnss_lnos.so.2"
 
-# ----- nsswitch.conf -----
-if grep -q "^hosts:.*\blnos\b" /etc/nsswitch.conf 2>/dev/null; then
-    info "lnos already in /etc/nsswitch.conf"
-else
+# ----- nsswitch.conf (handle multiple entries gracefully) -----
+NSSWITCH_LNOS=$(grep -c '^hosts:.*\<lnos\>' /etc/nsswitch.conf 2>/dev/null || true)
+if [ "$NSSWITCH_LNOS" -gt 1 ]; then
+    $SUDO sed -i 's/\blnos\s*//g' /etc/nsswitch.conf
     $SUDO sed -i 's/^hosts:.*/& lnos/' /etc/nsswitch.conf
-    info "Added 'lnos' to /etc/nsswitch.conf (before dns)"
+    info "  nsswitch.conf: cleaned duplicate lnos entries"
+elif [ "$NSSWITCH_LNOS" -eq 0 ]; then
+    $SUDO sed -i 's/^hosts:.*/& lnos/' /etc/nsswitch.conf
+    info "  nsswitch.conf: added lnos"
+else
+    info "  nsswitch.conf: lnos already present"
 fi
 
-# ----- ensure consistent config dir -----
 $SUDO mkdir -p /etc/lnos
 CFG_DIR="/etc/lnos"
 
-# ----- generate keys first -----
-info "Generating keys..."
-$AS_USER "$BUILD_DIR/lnosctl" generatekeys
-$AS_USER "$BUILD_DIR/lnosctl" init
+header "Keys & Configuration"
+
+if [ -f "${CFG_DIR}/public.key" ]; then
+    info "Keys already exist, keeping them"
+else
+    info "Generating Ed25519 keys..."
+    $AS_USER "$BUILD_DIR/lnosctl" generatekeys 2>/dev/null
+fi
+$AS_USER "$BUILD_DIR/lnosctl" init 2>/dev/null
+info "  Keys stored in ${CFG_DIR}"
+
+# ----- running daemon check -----
+DAEMON_ALREADY_RUNNING=false
+DAEMON_PID=""
+DAEMON_RESTART_AFTER=false
+if pgrep -x lnosd >/dev/null 2>&1; then
+    DAEMON_ALREADY_RUNNING=true
+    echo -e ""
+    warn "lnosd is already running (PID $(pgrep -x lnosd))"
+    echo -e ""
+    echo -e "  ${BOLD}What do you want to do?${NC}"
+    echo -e "    ${CYAN}1${NC}) Keep running — collision check via it, apply name on restart"
+    echo -e "    ${CYAN}2${NC}) Restart daemon after setup — apply new config now"
+    echo -e "    ${CYAN}3${NC}) Stop daemon — setup manages it from scratch"
+    read -r -p "  Choice [1]: " DAEMON_CHOICE
+    DAEMON_CHOICE="${DAEMON_CHOICE:-1}"
+    case "$DAEMON_CHOICE" in
+        2) DAEMON_RESTART_AFTER=true; info "Will restart lnosd after setup" ;;
+        3) info "Stopping lnosd..."
+           $SUDO systemctl stop lnosd 2>/dev/null || pkill lnosd 2>/dev/null || true
+           sleep 1 ;;
+        *) info "Using running daemon" ;;
+    esac
+fi
 
 # ----- node name selection -----
 DEVICE_NAMES=(laptop server node box desktop thinkpad raspi cubie macbook)
 DEVICE_TYPES=(pc server laptop pi node hub)
 OWNER_NAMES=(coldfox redcat bluejay greywolf darkowl silverfox goldfish wildbear moose coyote raven hawk eagle puma lynx bear wolf fox deer)
 
-HOSTNAME_BASED="$(hostname).pc.$(whoami)"
+HOSTNAME_BASED="$(hostname).pc.${WHOAMI}"
 
 pick_random_name() {
     local d="${DEVICE_NAMES[$((RANDOM % ${#DEVICE_NAMES[@]}))]}"
@@ -119,50 +205,46 @@ check_name_free() {
     local name="$1"
     local result
     result=$("$BUILD_DIR/lnosctl" resolve "$name" 2>/dev/null)
-    # If resolve returns an IP (contains a digit), name is taken
     case "$result" in
-        *[0-9]*) return 1 ;;  # taken
-        *)        return 0 ;;  # free
+        *[0-9]*) return 1 ;;
+        *)        return 0 ;;
     esac
 }
 
-# Start daemon temporarily for name collision check
-start_daemon_if_needed() {
-    if pgrep -x lnosd >/dev/null 2>&1; then
-        warn "Another lnosd is already running (PID $(pgrep -x lnosd))"
-        echo "  Setup can use it for name collision check, but name changes"
-        echo "  will only apply after restart."
-        read -r -p "  Continue with running daemon? [Y/n]: " answer
-        case "$answer" in
-            [nN]*) echo "  Exiting. Please stop lnosd first: systemctl stop lnosd" ; exit 1 ;;
-        esac
-        return 0
-    fi
-    info "Starting daemon (temp) to check name availability..."
+start_temp_daemon() {
+    info "Starting temporary daemon for collision check..."
     "$BUILD_DIR/lnosd" > /dev/null 2>&1 &
     DAEMON_PID=$!
     SOCKET_PATH="${CFG_DIR}/lnosd.sock"
-    for i in 1 2 3 4 5; do
+    for i in 1 2 3 4 5 6 7 8 9 10; do
         [ -S "$SOCKET_PATH" ] && break
         sleep 1
     done
+    if [ ! -S "$SOCKET_PATH" ]; then
+        warn "Daemon didn't start in time, skipping collision check"
+        return 1
+    fi
+    return 0
 }
 
-stop_daemon_if_started() {
+stop_temp_daemon() {
     if [ -n "$DAEMON_PID" ]; then
-        info "Stopping temp daemon..."
         kill "$DAEMON_PID" 2>/dev/null
         wait "$DAEMON_PID" 2>/dev/null
         unset DAEMON_PID
     fi
 }
 
+NEED_COLLISION_CHECK=true
+$DAEMON_ALREADY_RUNNING && NEED_COLLISION_CHECK=false
+
 RANDOM_PREVIEW="$(pick_random_name)"
-info "Choose node name:"
-echo "  1) Hostname-based — $HOSTNAME_BASED"
-echo "  2) Random — $RANDOM_PREVIEW"
-echo "  3) Manual input"
-read -r -p "Choice [1]: " NAME_CHOICE
+echo -e ""
+echo -e "  ${BOLD}Choose node name format:${NC}"
+echo -e "    ${CYAN}1${NC}) Hostname-based — ${GREEN}${HOSTNAME_BASED}${NC}"
+echo -e "    ${CYAN}2${NC}) Random        — ${GREEN}${RANDOM_PREVIEW}${NC}"
+echo -e "    ${CYAN}3${NC}) Manual input"
+read -r -p "  Choice [1]: " NAME_CHOICE
 NAME_CHOICE="${NAME_CHOICE:-1}"
 
 NODE_NAME=""
@@ -170,37 +252,50 @@ while [ -z "$NODE_NAME" ]; do
     case "$NAME_CHOICE" in
         1) NODE_NAME="$HOSTNAME_BASED" ;;
         2) NODE_NAME="${RANDOM_FALLBACK:-$(pick_random_name)}" ;;
-        3) read -r -p "Enter node name (device.type.owner): " NODE_NAME ;;
-        *) read -r -p "Invalid choice. Enter name manually: " NODE_NAME ;;
+        3) read -r -p "  Enter name (device.type.owner): " NODE_NAME ;;
+        *) read -r -p "  Invalid. Enter name manually: " NODE_NAME ;;
     esac
 
     if [ -n "$NODE_NAME" ]; then
-        start_daemon_if_needed
-        if ! check_name_free "$NODE_NAME"; then
-            echo ""
-            warn "Name '$NODE_NAME' is already taken on the network!"
-            echo "Choose another:"
-            echo "  1) Try another hostname-based"
-            echo "  2) Try another random"
-            echo "  3) Manual input"
-            read -r -p "Choice [2]: " NAME_CHOICE
-            NAME_CHOICE="${NAME_CHOICE:-2}"
-            NODE_NAME=""
-            RANDOM_FALLBACK="$(pick_random_name)"
+        if $NEED_COLLISION_CHECK; then
+            start_temp_daemon && CHECK="ok" || CHECK="skip"
+            if [ "$CHECK" = "ok" ] && ! check_name_free "$NODE_NAME"; then
+                echo -e ""
+                warn "Name '${NODE_NAME}' is ${BOLD}taken${NC} on the network!"
+                echo ""
+                echo -e "    ${CYAN}1${NC}) Try hostname-based"
+                echo -e "    ${CYAN}2${NC}) Try another random"
+                echo -e "    ${CYAN}3${NC}) Manual input"
+                read -r -p "    Choice [2]: " NAME_CHOICE
+                NAME_CHOICE="${NAME_CHOICE:-2}"
+                NODE_NAME=""
+                RANDOM_FALLBACK="$(pick_random_name)"
+                stop_temp_daemon
+            else
+                stop_temp_daemon
+            fi
+        elif $DAEMON_ALREADY_RUNNING; then
+            if ! check_name_free "$NODE_NAME"; then
+                echo -e ""
+                warn "Name '${NODE_NAME}' is ${BOLD}taken${NC} on the network!"
+                echo ""
+                echo -e "    ${CYAN}1${NC}) Try hostname-based"
+                echo -e "    ${CYAN}2${NC}) Try another random"
+                echo -e "    ${CYAN}3${NC}) Manual input"
+                read -r -p "    Choice [2]: " NAME_CHOICE
+                NAME_CHOICE="${NAME_CHOICE:-2}"
+                NODE_NAME=""
+                RANDOM_FALLBACK="$(pick_random_name)"
+            fi
         fi
     fi
 done
 
-stop_daemon_if_started
-
 $AS_USER "$BUILD_DIR/lnosctl" set name "$NODE_NAME"
-info "Node name → $NODE_NAME"
-if pgrep -x lnosd >/dev/null 2>&1; then
-    info "Restart the running daemon to apply: systemctl restart lnosd"
-fi
+info "Node name set to ${GREEN}${NODE_NAME}${NC}"
 
-# ----- systemd service -----
- if command -v systemctl >/dev/null 2>&1; then
+# ----- systemd / OpenRC -----
+if command -v systemctl >/dev/null 2>&1; then
     UNIT="/etc/systemd/system/lnosd.service"
     if [ ! -f "$UNIT" ]; then
         $SUDO tee "$UNIT" > /dev/null <<EOF
@@ -221,60 +316,115 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
         $SUDO systemctl daemon-reload
-        info "systemd unit → $UNIT"
+        info "systemd unit created"
     else
-        info "systemd unit already exists"
+        info "systemd unit exists"
     fi
 elif command -v rc-update >/dev/null 2>&1; then
     INITD="/etc/init.d/lnosd"
-    $SUDO tee "$INITD" > /dev/null <<EOF
+    if [ ! -f "$INITD" ]; then
+        $SUDO tee "$INITD" > /dev/null <<EOF
 #!/sbin/openrc-run
 command="/usr/local/bin/lnosd"
 command_background=true
 pidfile="/run/lnosd.pid"
 EOF
-    $SUDO chmod +x "$INITD"
-    info "OpenRC init script → $INITD"
+        $SUDO chmod +x "$INITD"
+        info "OpenRC init script created"
+    else
+        info "OpenRC init script exists"
+    fi
 fi
 
 # ----- firewall -----
-info "Firewall: opening multicast group 239.255.42.99:4545"
-info "(all nodes must use the same group:port to discover each other)"
+FWR=""
 if command -v ufw >/dev/null 2>&1; then
-    $SUDO ufw allow proto udp to 239.255.42.99 port 4545 comment 'LNOS' 2>/dev/null && info "  ufw: done"
+    if $SUDO ufw allow proto udp to 239.255.42.99 port 4545 comment 'LNOS' 2>/dev/null; then
+        FWR="ufw"
+        $SUDO ufw reload 2>/dev/null || true
+    fi
 elif command -v firewall-cmd >/dev/null 2>&1; then
-    $SUDO firewall-cmd --permanent --add-rich-rule='rule family="ipv4" destination address="239.255.42.99" port port="4545" protocol="udp" accept' >/dev/null && $SUDO firewall-cmd --reload >/dev/null && info "  firewalld: done"
+    if $SUDO firewall-cmd --permanent --add-rich-rule='rule family="ipv4" destination address="239.255.42.99" port port="4545" protocol="udp" accept' >/dev/null 2>&1; then
+        $SUDO firewall-cmd --reload >/dev/null 2>&1 && FWR="firewalld"
+    fi
 elif command -v iptables >/dev/null 2>&1; then
-    $SUDO iptables -C INPUT -d 239.255.42.99 -p udp --dport 4545 -j ACCEPT 2>/dev/null || {
-        $SUDO iptables -A INPUT -d 239.255.42.99 -p udp --dport 4545 -j ACCEPT
-        info "  iptables: done"
-    }
+    if ! $SUDO iptables -C INPUT -d 239.255.42.99 -p udp --dport 4545 -j ACCEPT 2>/dev/null; then
+        $SUDO iptables -A INPUT -d 239.255.42.99 -p udp --dport 4545 -j ACCEPT && FWR="iptables"
+    else
+        FWR="iptables (already set)"
+    fi
+fi
+if [ -n "$FWR" ]; then
+    info "Firewall: opened multicast (239.255.42.99:4545) via ${FWR}"
 else
-    warn "  no firewall tool found; ensure multicast is not blocked"
+    warn "No firewall tool detected; ensure multicast (239.255.42.99:4545) is not blocked"
 fi
 
 # ----- seed owners.db -----
 echo "$NODE_NAME" > "${CFG_DIR}/owners.db" 2>/dev/null || true
 chmod 644 "${CFG_DIR}/owners.db" 2>/dev/null || true
+$SUDO chown root:root "${CFG_DIR}/owners.db" 2>/dev/null || true
+
+# ----- restart if needed -----
+if [ "${DAEMON_RESTART_AFTER}" = "true" ]; then
+    info "Restarting lnosd with new config..."
+    if command -v systemctl >/dev/null 2>&1; then
+        $SUDO systemctl restart lnosd 2>/dev/null && RESTARTED=true
+    fi
+    if [ ! "${RESTARTED}" = "true" ]; then
+        pkill lnosd 2>/dev/null || true
+        sleep 1
+        nohup /usr/local/bin/lnosd > /dev/null 2>&1 &
+    fi
+    sleep 2
+    if pgrep -x lnosd >/dev/null 2>&1; then
+        info "lnosd restarted successfully"
+    else
+        warn "lnosd failed to restart — check logs: journalctl -u lnosd"
+    fi
+fi
+
+# ----- detect IP -----
+MY_IP=""
+for iface in $(ip -4 addr show scope global up | grep -oP 'inet \K[\d.]+'); do
+    case "$iface" in
+        127.*|172.17.*|172.18.*) ;;
+        *) MY_IP="$iface"; break ;;
+    esac
+done
+[ -z "$MY_IP" ] && MY_IP="<detect on target machine>"
 
 # ----- done -----
-echo ""
-info "=== LNOS setup complete ==="
-echo ""
-echo "  Node name:     $NODE_NAME"
-echo "  Config dir:    $CFG_DIR"
-echo "  Binaries:      /usr/local/bin/lnosd, /usr/local/bin/lnosctl"
-echo "  NSS module:    $LIBDIR/libnss_lnos.so.2"
-echo ""
-echo "  Start:    systemctl start lnosd"
-echo "  Autostart: systemctl enable --now lnosd"
-echo "  Manual:   sudo lnosd"
-echo "  CLI:      lnosctl stats"
-echo "  Logs:     journalctl -u lnosd -f"
-echo "  Resolve:  getent hosts ${NODE_NAME}"
-echo "  Uninstall: ./uninstall.sh"
-echo ""
-echo "  All nodes in the same network must use the same multicast group and port."
-echo "  Default is 239.255.42.99:4545 — change only if it conflicts:"
-echo "    lnosctl set mcast_group <ip>"
-echo "    lnosctl set port <num>"
+echo -e ""
+header "Setup complete"
+
+echo -e "${DIM}┌─────────────────────────────────────────────────────────────┐${NC}"
+echo -e "${DIM}│${NC}  ${GREEN}Your node${NC}                                                  ${DIM}│${NC}"
+echo -e "${DIM}│${NC}    Name:  ${BOLD}${NODE_NAME}${NC}                                          ${DIM}│${NC}"
+echo -e "${DIM}│${NC}    IP:    ${MY_IP}                                               ${DIM}│${NC}"
+echo -e "${DIM}│${NC}    Port:  4545  Group: 239.255.42.99                              ${DIM}│${NC}"
+echo -e "${DIM}│${NC}                                                             ${DIM}│${NC}"
+echo -e "${DIM}│${NC}  ${GREEN}Dashboard${NC}                                                ${DIM}│${NC}"
+echo -e "${DIM}│${NC}    ${UL}http://localhost:9999${NC}    — web UI with peer list          ${DIM}│${NC}"
+echo -e "${DIM}│${NC}    ${UL}http://${MY_IP}:9999${NC}     — from other machines on LAN   ${DIM}│${NC}"
+echo -e "${DIM}│${NC}                                                             ${DIM}│${NC}"
+echo -e "${DIM}│${NC}  ${GREEN}Commands${NC}                                                 ${DIM}│${NC}"
+echo -e "${DIM}│${NC}    systemctl ${BOLD}start${NC} lnosd           start the daemon           ${DIM}│${NC}"
+echo -e "${DIM}│${NC}    systemctl ${BOLD}enable --now${NC} lnosd    enable on boot + start     ${DIM}│${NC}"
+echo -e "${DIM}│${NC}    lnosctl ${BOLD}stats${NC}                   show peer count & metrics   ${DIM}│${NC}"
+echo -e "${DIM}│${NC}    getent hosts ${BOLD}${NODE_NAME}${NC}         resolve your own name    ${DIM}│${NC}"
+echo -e "${DIM}│${NC}    journalctl ${BOLD}-u lnosd -f${NC}          follow daemon logs         ${DIM}│${NC}"
+echo -e "${DIM}│${NC}                                                             ${DIM}│${NC}"
+echo -e "${DIM}│${NC}  ${GREEN}On other machines${NC}                                          ${DIM}│${NC}"
+echo -e "${DIM}│${NC}    Install LNOS the same way — all nodes discover each other   ${DIM}│${NC}"
+echo -e "${DIM}│${NC}    automatically on the same multicast group                   ${DIM}│${NC}"
+echo -e "${DIM}│${NC}    (239.255.42.99:4545).                                        ${DIM}│${NC}"
+echo -e "${DIM}└─────────────────────────────────────────────────────────────┘${NC}"
+
+echo -e ""
+echo -e " ${DIM}Config:${NC}      ${BOLD}${CFG_DIR}/${NC}"
+echo -e " ${DIM}Binaries:${NC}    ${BOLD}/usr/local/bin/{lnosd,lnosctl}${NC}"
+echo -e " ${DIM}NSS module:${NC}  ${BOLD}${LIBDIR}/libnss_lnos.so.2${NC}"
+echo -e " ${DIM}nsswitch:${NC}    ${BOLD}/etc/nsswitch.conf${NC} (hosts: ... lnos)"
+echo -e " ${DIM}Uninstall:${NC}   ${BOLD}./uninstall.sh${NC}"
+echo -e ""
