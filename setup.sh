@@ -32,23 +32,32 @@ box()   { local lines=()
           done
           echo -e "${DIM}└─────────────────────────────────────────────────────────────┘${NC}"; }
 
+# ----- interactive check -----
+INTERACTIVE=false
+[ -t 0 ] && INTERACTIVE=true
+
 # ----- banner -----
 echo -e ""
-echo -e " ${MAGENTA}╔═══════════════════════════════════════════════════════════╗${NC}"
-echo -e " ${MAGENTA}║${NC}  ${BOLD}LNOS${NC} — ${BOLD}L${NC}ocal ${BOLD}N${NC}etwork ${BOLD}O${NC}verlay ${BOLD}S${NC}ystem              ${MAGENTA}║${NC}"
-echo -e " ${MAGENTA}║${NC}  encrypted peer discovery & name resolution          ${MAGENTA}║${NC}"
-echo -e " ${MAGENTA}╚═══════════════════════════════════════════════════════════╝${NC}"
+echo -e " ${MAGENTA} __    _   ______  _____${NC}"
+echo -e " ${MAGENTA}/ /   / | / / __ \/ ___/${NC}"
+echo -e " ${MAGENTA}/ /   /  |/ / / / /\__ \ ${NC}"
+echo -e " ${MAGENTA}/ /___/ /|  / /_/ /___/ / ${NC}"
+echo -e " ${MAGENTA}/_____/_/ |_/\____//____/ ${NC}"
+echo -e " ${GREEN}Local Network Overlay System${NC}"
+echo -e " ${CYAN}encrypted peer discovery & name resolution${NC}"
 echo -e ""
 
 # ----- root check -----
 if [ "$(id -u)" -eq 0 ]; then
     if [ -z "$SUDO_USER" ]; then
-        echo -e " ${YELLOW}⚠${NC} You are running as ${BOLD}root${NC} (not via sudo)."
-        echo -e "   This will install configs owned by root."
-        echo -e "   If you want configs owned by your user, run with ${BOLD}sudo${NC} as a regular user."
-        echo -e ""
-        read -r -p "  Continue as root? [y/N]: " ans
-        case "$ans" in [yY]|[yY][eE][sS]) ;; *) echo "  Exiting."; exit 1 ;; esac
+        if $INTERACTIVE; then
+            echo -e " ${YELLOW}⚠${NC} Running as ${BOLD}root${NC} (not via sudo)."
+            echo -e "   Configs will be owned by root."
+            read -r -p "  Continue as root? [y/N]: " ans
+            case "$ans" in [yY]|[yY][eE][sS]) ;; *) echo "  Exiting."; exit 1 ;; esac
+        else
+            echo -e " ${YELLOW}⚠${NC} Running as root (non-interactive) — continuing"
+        fi
         AS_USER=""
         SUDO=""
     else
@@ -169,22 +178,26 @@ DAEMON_PID=""
 DAEMON_RESTART_AFTER=false
 if pgrep -x lnosd >/dev/null 2>&1; then
     DAEMON_ALREADY_RUNNING=true
-    echo -e ""
-    warn "lnosd is already running (PID $(pgrep -x lnosd))"
-    echo -e ""
-    echo -e "  ${BOLD}What do you want to do?${NC}"
-    echo -e "    ${CYAN}1${NC}) Keep running — collision check via it, apply name on restart"
-    echo -e "    ${CYAN}2${NC}) Restart daemon after setup — apply new config now"
-    echo -e "    ${CYAN}3${NC}) Stop daemon — setup manages it from scratch"
-    read -r -p "  Choice [1]: " DAEMON_CHOICE
-    DAEMON_CHOICE="${DAEMON_CHOICE:-1}"
-    case "$DAEMON_CHOICE" in
-        2) DAEMON_RESTART_AFTER=true; info "Will restart lnosd after setup" ;;
-        3) info "Stopping lnosd..."
-           $SUDO systemctl stop lnosd 2>/dev/null || pkill lnosd 2>/dev/null || true
-           sleep 1 ;;
-        *) info "Using running daemon" ;;
-    esac
+    if $INTERACTIVE; then
+        echo -e ""
+        warn "lnosd is already running (PID $(pgrep -x lnosd))"
+        echo -e ""
+        echo -e "  ${BOLD}What do you want to do?${NC}"
+        echo -e "    ${CYAN}1${NC}) Keep running — collision check via it, apply name on restart"
+        echo -e "    ${CYAN}2${NC}) Restart daemon after setup — apply new config now"
+        echo -e "    ${CYAN}3${NC}) Stop daemon — setup manages it from scratch"
+        read -r -p "  Choice [1]: " DAEMON_CHOICE
+        DAEMON_CHOICE="${DAEMON_CHOICE:-1}"
+        case "$DAEMON_CHOICE" in
+            2) DAEMON_RESTART_AFTER=true; info "Will restart lnosd after setup" ;;
+            3) info "Stopping lnosd..."
+               $SUDO systemctl stop lnosd 2>/dev/null || pkill lnosd 2>/dev/null || true
+               sleep 1 ;;
+            *) info "Using running daemon" ;;
+        esac
+    else
+        info "lnosd already running (PID $(pgrep -x lnosd)) — keeping it"
+    fi
 fi
 
 # ----- node name selection -----
@@ -260,32 +273,40 @@ while [ -z "$NODE_NAME" ]; do
         if $NEED_COLLISION_CHECK; then
             start_temp_daemon && CHECK="ok" || CHECK="skip"
             if [ "$CHECK" = "ok" ] && ! check_name_free "$NODE_NAME"; then
-                echo -e ""
-                warn "Name '${NODE_NAME}' is ${BOLD}taken${NC} on the network!"
-                echo ""
-                echo -e "    ${CYAN}1${NC}) Try hostname-based"
-                echo -e "    ${CYAN}2${NC}) Try another random"
-                echo -e "    ${CYAN}3${NC}) Manual input"
-                read -r -p "    Choice [2]: " NAME_CHOICE
-                NAME_CHOICE="${NAME_CHOICE:-2}"
-                NODE_NAME=""
-                RANDOM_FALLBACK="$(pick_random_name)"
+                warn "Name '${NODE_NAME}' is ${BOLD}taken${NC}!"
+                if $INTERACTIVE; then
+                    echo ""
+                    echo -e "    ${CYAN}1${NC}) Try hostname-based"
+                    echo -e "    ${CYAN}2${NC}) Try another random"
+                    echo -e "    ${CYAN}3${NC}) Manual input"
+                    read -r -p "    Choice [2]: " NAME_CHOICE
+                    NAME_CHOICE="${NAME_CHOICE:-2}"
+                    NODE_NAME=""
+                    RANDOM_FALLBACK="$(pick_random_name)"
+                else
+                    info "Using a random suffix"
+                    NODE_NAME="${NODE_NAME}.$(tr -dc a-z0-9 < /dev/urandom 2>/dev/null | head -c4 || echo "x4g7")"
+                fi
                 stop_temp_daemon
             else
                 stop_temp_daemon
             fi
         elif $DAEMON_ALREADY_RUNNING; then
             if ! check_name_free "$NODE_NAME"; then
-                echo -e ""
-                warn "Name '${NODE_NAME}' is ${BOLD}taken${NC} on the network!"
-                echo ""
-                echo -e "    ${CYAN}1${NC}) Try hostname-based"
-                echo -e "    ${CYAN}2${NC}) Try another random"
-                echo -e "    ${CYAN}3${NC}) Manual input"
-                read -r -p "    Choice [2]: " NAME_CHOICE
-                NAME_CHOICE="${NAME_CHOICE:-2}"
-                NODE_NAME=""
-                RANDOM_FALLBACK="$(pick_random_name)"
+                warn "Name '${NODE_NAME}' is ${BOLD}taken${NC}!"
+                if $INTERACTIVE; then
+                    echo ""
+                    echo -e "    ${CYAN}1${NC}) Try hostname-based"
+                    echo -e "    ${CYAN}2${NC}) Try another random"
+                    echo -e "    ${CYAN}3${NC}) Manual input"
+                    read -r -p "    Choice [2]: " NAME_CHOICE
+                    NAME_CHOICE="${NAME_CHOICE:-2}"
+                    NODE_NAME=""
+                    RANDOM_FALLBACK="$(pick_random_name)"
+                else
+                    info "Using a random suffix"
+                    NODE_NAME="${NODE_NAME}.$(tr -dc a-z0-9 < /dev/urandom 2>/dev/null | head -c4 || echo "x4g7")"
+                fi
             fi
         fi
     fi
