@@ -24,6 +24,7 @@
 - ⚡ **NSS Integration**: `getent hosts pc.main.gervaty` works in any program — ping, ssh, curl.
 - 🔇 **Per-Source Rate Limiting**: 50 pkt/sec per IP — one flaky node can't DoS the network.
 - 🧠 **Name Takeover Protection**: Ed25519 public key pinned to name — key mismatch = packet rejected.
+- 🛡️ **Secure-by-Default Install**: Setup operates with strict privileges — keys are generated with secure POSIX permissions (0600) and only privileged daemon operations run as root, protecting against privilege leaks.
 
 ---
 
