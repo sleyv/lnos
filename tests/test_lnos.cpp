@@ -5,6 +5,7 @@
 #include <sodium.h>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 
 TEST(LnosProtocolTest, EncodeDecodeAnnouncePacket) {
     std::vector<lnos::Service> services = {
@@ -465,6 +466,189 @@ TEST(LnosProtocolTest, GossipSerialization) {
     EXPECT_EQ(decoded.gossipNodes[1].services[0].name, "custom");
     EXPECT_EQ(decoded.gossipNodes[1].services[0].port, 9999);
     EXPECT_EQ(decoded.gossipNodes[1].publicKey, node2.publicKey);
+}
+
+TEST(LnosProtocolTest, NameWithMaxLengthAndServices) {
+    std::string name(1024, 'n');
+    std::vector<lnos::Service> services;
+    for (int i = 0; i < 10; ++i) {
+        services.push_back({"s" + std::to_string(i), static_cast<uint16_t>(100 + i)});
+    }
+    lnos::Packet original(name, services);
+    original.publicKey.fill(0xAB);
+    original.signature.fill(0xCD);
+
+    lnos::Blob blob = lnos::encode(original, true);
+    lnos::EncodedPacket encoded{blob.data(), blob.size()};
+    lnos::Packet decoded;
+    ASSERT_TRUE(lnos::decode(encoded, decoded));
+    EXPECT_EQ(decoded.announce.name, name);
+    ASSERT_EQ(decoded.announce.services.size(), 10);
+    EXPECT_EQ(decoded.announce.services[9].name, "s9");
+    EXPECT_EQ(decoded.announce.services[9].port, 109);
+}
+
+TEST(LnosProtocolTest, ServiceWithEmptyName) {
+    std::vector<lnos::Service> services = {{"", 1234}};
+    lnos::Packet original("empty.svc.node", services);
+    original.publicKey.fill(0);
+    original.signature.fill(0);
+
+    lnos::Blob blob = lnos::encode(original, true);
+    lnos::EncodedPacket encoded{blob.data(), blob.size()};
+    lnos::Packet decoded;
+    ASSERT_TRUE(lnos::decode(encoded, decoded));
+    ASSERT_EQ(decoded.announce.services.size(), 1);
+    EXPECT_EQ(decoded.announce.services[0].name, "");
+    EXPECT_EQ(decoded.announce.services[0].port, 1234);
+}
+
+TEST(LnosProtocolTest, GossipIpv6Address) {
+    lnos::Packet original;
+    original.type = lnos::PacketType::GossipRequest;
+
+    lnos::GossipNode node;
+    node.name = "ipv6.gossip.node";
+    node.ip = "fe80::abcd:1234:5678:90ef";
+    node.publicKey.fill(0xFF);
+    original.gossipNodes.push_back(node);
+    original.publicKey.fill(0x01);
+    original.signature.fill(0x02);
+
+    lnos::Blob blob = lnos::encode(original, true);
+    lnos::EncodedPacket encoded{blob.data(), blob.size()};
+    lnos::Packet decoded;
+    ASSERT_TRUE(lnos::decode(encoded, decoded));
+    ASSERT_EQ(decoded.gossipNodes.size(), 1);
+    EXPECT_EQ(decoded.gossipNodes[0].name, "ipv6.gossip.node");
+    EXPECT_EQ(decoded.gossipNodes[0].ip, "fe80::abcd:1234:5678:90ef");
+}
+
+TEST(LnosProtocolTest, GossipNodeWithoutServices) {
+    lnos::Packet original;
+    original.type = lnos::PacketType::GossipRequest;
+
+    lnos::GossipNode node;
+    node.name = "bare.node";
+    node.ip = "10.0.0.1";
+    node.publicKey.fill(0x77);
+    original.gossipNodes.push_back(node);
+    original.publicKey.fill(0x88);
+    original.signature.fill(0x99);
+
+    lnos::Blob blob = lnos::encode(original, true);
+    lnos::EncodedPacket encoded{blob.data(), blob.size()};
+    lnos::Packet decoded;
+    ASSERT_TRUE(lnos::decode(encoded, decoded));
+    ASSERT_EQ(decoded.gossipNodes.size(), 1);
+    EXPECT_EQ(decoded.gossipNodes[0].name, "bare.node");
+    EXPECT_EQ(decoded.gossipNodes[0].ip, "10.0.0.1");
+    EXPECT_TRUE(decoded.gossipNodes[0].services.empty());
+}
+
+TEST(LnosProtocolTest, DecodeUnknownVersion) {
+    lnos::Blob custom;
+    lnos::blobPush(custom, std::string("999")); // unknown version
+    lnos::blobPush(custom, (uint16_t)0);
+    custom.push_back(0); // isEncrypted = 0 (1 byte)
+    lnos::blobPush(custom, std::string("x"));
+    lnos::blobPush(custom, (uint64_t)0);
+    std::array<uint8_t, PUBLIC_KEY_SIZE> pub{};
+    std::array<uint8_t, SIGNATURE_SIZE> sig{};
+    lnos::blobPush(custom, pub);
+    lnos::blobPush(custom, sig);
+
+    lnos::EncodedPacket encoded{custom.data(), custom.size()};
+    lnos::Packet decoded;
+    EXPECT_TRUE(lnos::decode(encoded, decoded));
+    EXPECT_EQ(decoded.version, "999");
+}
+
+TEST(LnosCryptoTest, DecryptWithWrongKey) {
+    ASSERT_GE(sodium_init(), 0);
+
+    unsigned char pubA[crypto_sign_PUBLICKEYBYTES];
+    unsigned char privA[crypto_sign_SECRETKEYBYTES];
+    crypto_sign_keypair(pubA, privA);
+
+    unsigned char pubB[crypto_sign_PUBLICKEYBYTES];
+    unsigned char privB[crypto_sign_SECRETKEYBYTES];
+    crypto_sign_keypair(pubB, privB);
+
+    unsigned char pubC[crypto_sign_PUBLICKEYBYTES];
+    unsigned char privC[crypto_sign_SECRETKEYBYTES];
+    crypto_sign_keypair(pubC, privC);
+
+    std::array<uint8_t, PUBLIC_KEY_SIZE> pkA, pkB, pkC;
+    std::memcpy(pkA.data(), pubA, PUBLIC_KEY_SIZE);
+    std::memcpy(pkB.data(), pubB, PUBLIC_KEY_SIZE);
+    std::memcpy(pkC.data(), pubC, PUBLIC_KEY_SIZE);
+    std::array<uint8_t, PRIVATE_KEY_SIZE> skA, skB;
+    std::memcpy(skA.data(), privA, PRIVATE_KEY_SIZE);
+    std::memcpy(skB.data(), privB, PRIVATE_KEY_SIZE);
+
+    // Encrypt multicast with A's key
+    lnos::Packet original("wrong.key.test", {{"test", 1}});
+    original.type = lnos::PacketType::Announce;
+    original.publicKey = pkA;
+    ASSERT_TRUE(lnos::signPacket(original, skA));
+    ASSERT_TRUE(lnos::encryptPacketPayload(original, skA, pkA, true));
+
+    lnos::Blob blob = lnos::encode(original, true);
+    lnos::EncodedPacket encoded{blob.data(), blob.size()};
+    lnos::Packet decoded;
+    ASSERT_TRUE(lnos::decode(encoded, decoded));
+
+    // Try to decrypt with B's key — should fail
+    EXPECT_FALSE(lnos::decryptPacketPayload(decoded, skB, pkB, true));
+
+    // Decrypt with A's key — should succeed
+    lnos::EncodedPacket encoded2{blob.data(), blob.size()};
+    lnos::Packet decoded2;
+    ASSERT_TRUE(lnos::decode(encoded2, decoded2));
+    ASSERT_TRUE(lnos::decryptPacketPayload(decoded2, skA, pkA, true));
+    EXPECT_EQ(decoded2.announce.name, "wrong.key.test");
+}
+
+TEST(LnosCryptoTest, SignWithDifferentKeyFailsVerify) {
+    ASSERT_GE(sodium_init(), 0);
+
+    unsigned char pubA[crypto_sign_PUBLICKEYBYTES];
+    unsigned char privA[crypto_sign_SECRETKEYBYTES];
+    crypto_sign_keypair(pubA, privA);
+
+    unsigned char pubB[crypto_sign_PUBLICKEYBYTES];
+    unsigned char privB[crypto_sign_SECRETKEYBYTES];
+    crypto_sign_keypair(pubB, privB);
+
+    std::array<uint8_t, PUBLIC_KEY_SIZE> pkA, pkB;
+    std::memcpy(pkA.data(), pubA, PUBLIC_KEY_SIZE);
+    std::memcpy(pkB.data(), pubB, PUBLIC_KEY_SIZE);
+    std::array<uint8_t, PRIVATE_KEY_SIZE> skB;
+    std::memcpy(skB.data(), privB, PRIVATE_KEY_SIZE);
+
+    // Sign with B's key but put A's public key in packet
+    lnos::Packet packet("key.mismatch", {});
+    packet.publicKey = pkA; // Claim to be A
+    ASSERT_TRUE(lnos::signPacket(packet, skB)); // Actually signed by B
+
+    EXPECT_FALSE(lnos::verifyPacket(packet)); // Should fail: publicKey != signer
+}
+
+TEST(LnosConfigTest, ReadFileWhitespaceOnly) {
+    // Create temp file with only whitespace
+    std::string tmp = "/tmp/lnos_test_ws_" + std::to_string(getpid());
+    {
+        std::ofstream f(tmp);
+        f << "   \t   \n";
+    }
+    EXPECT_EQ(lnos::readFile(tmp, "fallback"), "fallback");
+    std::filesystem::remove(tmp);
+}
+
+TEST(LnosConfigTest, SetConfigEmptyValue) {
+    EXPECT_TRUE(lnos::setConfig("name", ""));
+    EXPECT_TRUE(lnos::setConfig("domain", ""));
 }
 
 TEST(LnosCryptoTest, PayloadEncryption) {

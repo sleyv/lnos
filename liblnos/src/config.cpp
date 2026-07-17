@@ -32,9 +32,9 @@ namespace lnos {
         if (!f.is_open()) return fallback;
         std::string line;
         std::getline(f, line);
-        if (line.empty()) return fallback;
         auto pos = line.find_last_not_of(" \t\n\r");
-        if (pos != std::string::npos) line.erase(pos + 1);
+        if (pos == std::string::npos) return fallback;
+        line.erase(pos + 1);
         return line;
     }
 
