@@ -156,7 +156,9 @@ lnos/
   ├── lnosctl/                # CLI-утилита управления
   │   └── src/main.cpp        # Генерация ключей, конфиг, статистика
   ├── tests/
-  │   └── test_lnos.cpp       # 29 GTest unit-тестов
+  │   └── test_lnos.cpp       # 38 GTest unit-тестов
+  ├── scripts/
+  │   └── install.sh          # One-click установка (curl-pipe-bash)
   ├── setup.sh                # Скрипт сборки и установки
   ├── uninstall.sh            # Скрипт полного удаления
   ├── README.md               # Документация (английский)

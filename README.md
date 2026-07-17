@@ -156,10 +156,13 @@ lnos/
   ├── lnosctl/                # CLI control tool
   │   └── src/main.cpp        # key generation, config, stats
   ├── tests/
-  │   └── test_lnos.cpp       # 29 GTest unit tests
+  │   └── test_lnos.cpp       # 38 GTest unit tests
+  ├── scripts/
+  │   └── install.sh          # One-click install (curl-pipe-bash)
   ├── setup.sh                # Build + install script
   ├── uninstall.sh            # Full cleanup script
-  ├── README.md               # Documentation
+  ├── README.md               # Documentation (English)
+  ├── README_ru.md            # Documentation (Russian)
   └── summary.md              # Detailed changelog & architecture notes
 ```
 

@@ -111,13 +111,22 @@ UFW правило `from 224.0.0.0/4` → `Anywhere`. Старая версия 
 - Trait-based IPv4/IPv6 — дублирование кода sender/receiver устранено
 
 ## Тесты
-- **29/29 GTest** — все зелёные
-- Покрытие: encode/decode всех типов пакетов (включая GossipRequest/Response), пустые имена, дубли портов, лимиты строк и сервисов, Ed25519 подпись/верификация (tamper), шифрование payload (multicast + unicast), big-endian, blob push/consume, config dir resolution (XDG), config set/load, readFile
+- **38/38 GTest** — все зелёные
+- Покрытие: encode/decode всех типов пакетов (включая GossipRequest/Response), пустые имена, дубли портов, лимиты строк и сервисов, Ed25519 подпись/верификация (tamper), шифрование payload (multicast + unicast + расшифровка чужим ключом), big-endian, blob push/consume, config dir resolution (XDG), config set/load, readFile (включая whitespace-only), gossip с IPv6, gossip без сервисов, имя макс. длины + сервисы, сервис с пустым именем, sign с другим ключом, decode неизвестной версии
 
 ## Развёртывание
-- **setup.sh** — автоопределение пакетного менеджера (apt/pacman/dnf/zypper/emerge/apk), сборка, установка бинарников в `/usr/local/bin/`, NSS + nsswitch.conf + systemd/OpenRC + firewall + seed owners.db
+- **One-click install:** `bash -c "$(curl -fsSL https://raw.githubusercontent.com/sleyv/lnos/master/scripts/install.sh)"`
+- **setup.sh** — автоопределение пакетного менеджера (apt/pacman/dnf/zypper/emerge/apk), сборка, 3 варианта выбора имени (hostname/random/manual) с проверкой коллизий через `lnosctl resolve`. Работает без `sudo`: привилегированные шаги запрашивают sudo только в момент. Если `lnosd` уже запущен — предупреждает и предлагает продолжить
 - **uninstall.sh** — полный откат: остановка демона, удаление бинарников, NSS, откат nsswitch.conf, очистка firewall, удаление конфигов и build
 - **systemd:** `lnosd.service` с `Restart=on-failure`, `After=network-online.target`
+
+## Code quality (последний прогон)
+- Удалён `runPrinter()` — debug-функция, спамившая в systemd journal каждые 10 секунд
+- `handleSigint()` — убран `std::cout` (UB в signal handler)
+- `readFile()` — whitespace-only content теперь возвращает `fallback` вместо мусора
+- `getConfigDir()` — не-root процессы используют `/etc/lnos/` если он существует
+- Черновиковые комментарии в `crypto.cpp` заменены на краткое пояснение
+- `registry.h` — добавлен `#include <vector>` (ранее тянулся транзитивно)
 
 ## Известные ограничения
 1. Multicast не роутится между L2-сегментами без PIM — все узлы в одной подсети/VPN
