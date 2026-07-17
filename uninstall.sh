@@ -30,6 +30,10 @@ elif [ -f /etc/init.d/lnosd ]; then
     info "OpenRC service removed"
 fi
 
+# ----- remove binaries -----
+rm -f /usr/local/bin/lnosd /usr/local/bin/lnosctl
+info "Removed /usr/local/bin/lnosd, /usr/local/bin/lnosctl"
+
 # ----- remove NSS module -----
 for d in /usr/lib64 /usr/lib /lib64 /lib; do
     if [ -f "$d/libnss_lnos.so.2" ]; then

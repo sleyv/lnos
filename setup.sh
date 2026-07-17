@@ -64,6 +64,11 @@ for d in /usr/lib64 /usr/lib /lib64 /lib; do
 done
 [ -n "$LIBDIR" ] || LIBDIR="/usr/lib"
 
+# ----- install binaries -----
+install -m 755 "$BUILD_DIR/lnosd" /usr/local/bin/lnosd
+install -m 755 "$BUILD_DIR/lnosctl" /usr/local/bin/lnosctl
+info "Binaries → /usr/local/bin/lnosd, /usr/local/bin/lnosctl"
+
 # ----- install NSS module -----
 cp "$BUILD_DIR/libnss_lnos.so.2" "$LIBDIR/"
 ldconfig
@@ -110,7 +115,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$BUILD_DIR/lnosd
+ExecStart=/usr/local/bin/lnosd
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
@@ -128,7 +133,7 @@ elif command -v rc-update >/dev/null 2>&1; then
     INITD="/etc/init.d/lnosd"
     cat > "$INITD" <<EOF
 #!/sbin/openrc-run
-command="$BUILD_DIR/lnosd"
+command="/usr/local/bin/lnosd"
 command_background=true
 pidfile="/run/lnosd.pid"
 EOF
@@ -162,11 +167,13 @@ info "=== LNOS setup complete ==="
 echo ""
 echo "  Node name:     $NODE_NAME"
 echo "  Config dir:    $CFG_DIR"
-echo "  Build dir:     $BUILD_DIR"
+echo "  Binaries:      /usr/local/bin/lnosd, /usr/local/bin/lnosctl"
 echo "  NSS module:    $LIBDIR/libnss_lnos.so.2"
 echo ""
 echo "  Start:    systemctl start lnosd"
 echo "  Autostart: systemctl enable --now lnosd"
+echo "  Manual:   sudo lnosd"
+echo "  CLI:      lnosctl stats"
 echo "  Logs:     journalctl -u lnosd -f"
 echo "  Resolve:  getent hosts ${NODE_NAME}"
 echo "  Uninstall: ./uninstall.sh"
