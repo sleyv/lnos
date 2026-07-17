@@ -647,8 +647,21 @@ TEST(LnosConfigTest, ReadFileWhitespaceOnly) {
 }
 
 TEST(LnosConfigTest, SetConfigEmptyValue) {
+    const char* prev_xdg = std::getenv("XDG_CONFIG_HOME");
+    std::string prev = prev_xdg ? prev_xdg : "";
+
+    std::string tmp = "/tmp/lnos_test_config_empty_" + std::to_string(getpid());
+    setenv("XDG_CONFIG_HOME", tmp.c_str(), 1);
+
     EXPECT_TRUE(lnos::setConfig("name", ""));
     EXPECT_TRUE(lnos::setConfig("domain", ""));
+
+    std::filesystem::remove_all(tmp);
+    if (prev.empty()) {
+        unsetenv("XDG_CONFIG_HOME");
+    } else {
+        setenv("XDG_CONFIG_HOME", prev.c_str(), 1);
+    }
 }
 
 TEST(LnosCryptoTest, PayloadEncryption) {
