@@ -145,7 +145,7 @@ fi
 info "Firewall: opening multicast group 239.255.42.99:4545"
 info "(all nodes must use the same group:port to discover each other)"
 if command -v ufw >/dev/null 2>&1; then
-    ufw allow proto udp from 224.0.0.0/4 to 239.255.42.99 port 4545 comment 'LNOS' 2>/dev/null && info "  ufw: done"
+    ufw allow proto udp to 239.255.42.99 port 4545 comment 'LNOS' 2>/dev/null && info "  ufw: done"
 elif command -v firewall-cmd >/dev/null 2>&1; then
     firewall-cmd --permanent --add-rich-rule='rule family="ipv4" destination address="239.255.42.99" port port="4545" protocol="udp" accept' >/dev/null && firewall-cmd --reload >/dev/null && info "  firewalld: done"
 elif command -v iptables >/dev/null 2>&1; then

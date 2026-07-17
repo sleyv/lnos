@@ -51,7 +51,7 @@ fi
 
 # ----- firewall cleanup -----
 if command -v ufw >/dev/null 2>&1; then
-    ufw delete allow proto udp from 224.0.0.0/4 to 239.255.42.99 port 4545 2>/dev/null && info "ufw rule removed"
+    ufw delete allow proto udp to 239.255.42.99 port 4545 2>/dev/null && info "ufw rule removed"
 elif command -v firewall-cmd >/dev/null 2>&1; then
     firewall-cmd --permanent --remove-rich-rule='rule family="ipv4" destination address="239.255.42.99" port port="4545" protocol="udp" accept' >/dev/null 2>&1 && firewall-cmd --reload >/dev/null 2>&1 && info "firewalld rule removed"
 elif command -v iptables >/dev/null 2>&1; then
