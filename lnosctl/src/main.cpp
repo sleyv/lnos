@@ -4,7 +4,10 @@
 #include <sodium.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <lnos/config.h>
+#include <cstring>
 
 
 bool writeKey(const std::string& path, const unsigned char* key, std::size_t size)
@@ -66,6 +69,7 @@ void printUsage(char *program_name) {
     std::cerr << "    config                print LNOS config\n";
     std::cerr << "    set                   override LNOS config property\n";
     std::cerr << "    get                   print LNOS config property\n";
+    std::cerr << "    stats                 print LNOS daemon statistics\n";
 }
 
 int main(int argc, char** argv)
@@ -129,6 +133,43 @@ int main(int argc, char** argv)
         } else if (key == "domain") {
             std::cout << "Domain: " << lnos::readFile(lnos::getConfigDir() + "/domain", ".gervaty") << std::endl;
         }
+        return 0;
+    } else if (command == "stats") {
+        int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (sock < 0) {
+            std::cerr << "Failed to create UNIX socket\n";
+            return 1;
+        }
+        struct sockaddr_un un{};
+        un.sun_family = AF_UNIX;
+        std::string socket_path = lnos::getConfigDir() + "/lnosd.sock";
+        std::strncpy(un.sun_path, socket_path.c_str(), sizeof(un.sun_path) - 1);
+        un.sun_path[sizeof(un.sun_path) - 1] = '\0';
+
+        if (connect(sock, reinterpret_cast<sockaddr*>(&un), sizeof(un)) < 0) {
+            std::cerr << "Failed to connect to daemon at " << socket_path << " (is lnosd running?)\n";
+            close(sock);
+            return 1;
+        }
+
+        std::string query = "__STATS__\n";
+        if (write(sock, query.data(), query.length()) < 0) {
+            std::cerr << "Failed to send request to daemon\n";
+            close(sock);
+            return 1;
+        }
+
+        char buf[1024];
+        ssize_t n = read(sock, buf, sizeof(buf) - 1);
+        close(sock);
+
+        if (n <= 0) {
+            std::cerr << "Failed to read response from daemon\n";
+            return 1;
+        }
+
+        buf[n] = '\0';
+        std::cout << "=== LNOS Daemon Statistics ===\n" << buf;
         return 0;
     } else {
         printUsage(argv[0]);

@@ -245,8 +245,8 @@ TEST(LnosProtocolTest, BigEndianEncode) {
     lnos::Blob blob = lnos::encode(p, true);
 
     // Service port 1234 = 0x04D2, should be big endian: 0x04, 0xD2
-    // Layout: version(9) + type(2) + name(12) + svc_count(8) + svc_name(12) + port(2) + pubkey(32) + sig(64)
-    ASSERT_EQ(blob.size(), 141);
+    // Layout: version(9) + type(2) + isEncrypted(1) + name(12) + svc_count(8) + svc_name(12) + port(2) + pubkey(32) + sig(64)
+    ASSERT_EQ(blob.size(), 142);
     EXPECT_EQ(blob[blob.size() - SIGNATURE_SIZE - PUBLIC_KEY_SIZE - 2], 0x04) << "port high byte";
     EXPECT_EQ(blob[blob.size() - SIGNATURE_SIZE - PUBLIC_KEY_SIZE - 1], 0xD2) << "port low byte";
 }
@@ -420,4 +420,132 @@ TEST(LnosProtocolTest, ServiceWithSpecialChars) {
     EXPECT_EQ(decoded.announce.services[0].port, 8080);
     EXPECT_EQ(decoded.announce.services[1].name, "https");
     EXPECT_EQ(decoded.announce.services[1].port, 443);
+}
+
+TEST(LnosProtocolTest, GossipSerialization) {
+    lnos::Packet original;
+    original.type = lnos::PacketType::GossipRequest;
+
+    lnos::GossipNode node1;
+    node1.name = "gossip.node.one";
+    node1.ip = "192.168.1.10";
+    node1.services = {{"ssh", 22}, {"web", 80}};
+    node1.publicKey.fill(0xAA);
+
+    lnos::GossipNode node2;
+    node2.name = "gossip.node.two";
+    node2.ip = "ff02::1";
+    node2.services = {{"custom", 9999}};
+    node2.publicKey.fill(0xBB);
+
+    original.gossipNodes.push_back(node1);
+    original.gossipNodes.push_back(node2);
+    original.publicKey.fill(0x12);
+    original.signature.fill(0x34);
+
+    lnos::Blob blob = lnos::encode(original, true);
+
+    lnos::EncodedPacket encoded{blob.data(), blob.size()};
+    lnos::Packet decoded;
+
+    ASSERT_TRUE(lnos::decode(encoded, decoded));
+    EXPECT_EQ(decoded.type, lnos::PacketType::GossipRequest);
+    ASSERT_EQ(decoded.gossipNodes.size(), 2);
+
+    EXPECT_EQ(decoded.gossipNodes[0].name, "gossip.node.one");
+    EXPECT_EQ(decoded.gossipNodes[0].ip, "192.168.1.10");
+    ASSERT_EQ(decoded.gossipNodes[0].services.size(), 2);
+    EXPECT_EQ(decoded.gossipNodes[0].services[0].name, "ssh");
+    EXPECT_EQ(decoded.gossipNodes[0].services[0].port, 22);
+    EXPECT_EQ(decoded.gossipNodes[0].publicKey, node1.publicKey);
+
+    EXPECT_EQ(decoded.gossipNodes[1].name, "gossip.node.two");
+    EXPECT_EQ(decoded.gossipNodes[1].ip, "ff02::1");
+    ASSERT_EQ(decoded.gossipNodes[1].services.size(), 1);
+    EXPECT_EQ(decoded.gossipNodes[1].services[0].name, "custom");
+    EXPECT_EQ(decoded.gossipNodes[1].services[0].port, 9999);
+    EXPECT_EQ(decoded.gossipNodes[1].publicKey, node2.publicKey);
+}
+
+TEST(LnosCryptoTest, PayloadEncryption) {
+    ASSERT_GE(sodium_init(), 0);
+
+    unsigned char pub1[crypto_sign_PUBLICKEYBYTES];
+    unsigned char priv1[crypto_sign_SECRETKEYBYTES];
+    crypto_sign_keypair(pub1, priv1);
+
+    unsigned char pub2[crypto_sign_PUBLICKEYBYTES];
+    unsigned char priv2[crypto_sign_SECRETKEYBYTES];
+    crypto_sign_keypair(pub2, priv2);
+
+    std::array<uint8_t, PUBLIC_KEY_SIZE> publicKey1, publicKey2;
+    std::memcpy(publicKey1.data(), pub1, PUBLIC_KEY_SIZE);
+    std::memcpy(publicKey2.data(), pub2, PUBLIC_KEY_SIZE);
+
+    std::array<uint8_t, PRIVATE_KEY_SIZE> privateKey1, privateKey2;
+    std::memcpy(privateKey1.data(), priv1, PRIVATE_KEY_SIZE);
+    std::memcpy(privateKey2.data(), priv2, PRIVATE_KEY_SIZE);
+
+    // Test Multicast Encryption/Decryption
+    {
+        lnos::Packet original("mcast.encrypted.node", {{"ssh", 22}});
+        original.type = lnos::PacketType::Announce;
+        original.publicKey = publicKey1;
+        ASSERT_TRUE(lnos::signPacket(original, privateKey1));
+
+        // Encrypt as multicast (uses symmetric key derived from own publicKey)
+        ASSERT_TRUE(lnos::encryptPacketPayload(original, privateKey1, publicKey1, true));
+        EXPECT_EQ(original.isEncrypted, 1);
+        EXPECT_FALSE(original.encryptedPayload.empty());
+
+        // Decode must work but the payload is encrypted
+        lnos::Blob blob = lnos::encode(original, true);
+        lnos::EncodedPacket encoded{blob.data(), blob.size()};
+        lnos::Packet decoded;
+        ASSERT_TRUE(lnos::decode(encoded, decoded));
+        EXPECT_EQ(decoded.isEncrypted, 1);
+        EXPECT_TRUE(decoded.announce.name.empty()); // Name is inside encrypted payload
+
+        // Decrypt multicast
+        ASSERT_TRUE(lnos::decryptPacketPayload(decoded, privateKey1, publicKey1, true));
+        EXPECT_EQ(decoded.isEncrypted, 0);
+        EXPECT_EQ(decoded.announce.name, "mcast.encrypted.node");
+        ASSERT_EQ(decoded.announce.services.size(), 1);
+        EXPECT_EQ(decoded.announce.services[0].name, "ssh");
+        EXPECT_EQ(decoded.announce.services[0].port, 22);
+        EXPECT_TRUE(lnos::verifyPacket(decoded));
+    }
+
+    // Test Unicast Encryption/Decryption
+    {
+        lnos::Packet original;
+        original.type = lnos::PacketType::GossipRequest;
+        original.publicKey = publicKey1;
+
+        lnos::GossipNode gnode;
+        gnode.name = "unicast.node";
+        gnode.ip = "127.0.0.1";
+        original.gossipNodes.push_back(gnode);
+
+        ASSERT_TRUE(lnos::signPacket(original, privateKey1));
+
+        // Encrypt as unicast (uses sender's private key and recipient's public key)
+        ASSERT_TRUE(lnos::encryptPacketPayload(original, privateKey1, publicKey2, false));
+        EXPECT_EQ(original.isEncrypted, 2);
+
+        // Decode
+        lnos::Blob blob = lnos::encode(original, true);
+        lnos::EncodedPacket encoded{blob.data(), blob.size()};
+        lnos::Packet decoded;
+        ASSERT_TRUE(lnos::decode(encoded, decoded));
+        EXPECT_EQ(decoded.isEncrypted, 2);
+        EXPECT_TRUE(decoded.gossipNodes.empty());
+
+        // Decrypt unicast (recipient uses recipient's private key and sender's public key)
+        ASSERT_TRUE(lnos::decryptPacketPayload(decoded, privateKey2, publicKey1, false));
+        EXPECT_EQ(decoded.isEncrypted, 0);
+        ASSERT_EQ(decoded.gossipNodes.size(), 1);
+        EXPECT_EQ(decoded.gossipNodes[0].name, "unicast.node");
+        EXPECT_EQ(decoded.gossipNodes[0].ip, "127.0.0.1");
+    }
 }

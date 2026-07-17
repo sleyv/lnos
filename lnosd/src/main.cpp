@@ -18,21 +18,58 @@
 #include <net/if.h>
 #include <netdb.h>
 #include <sodium.h>
+#include <sstream>
+#include <sys/stat.h>
+#include <chrono>
+#include <random>
 
 #include <lnos/crypto.h>
 #include "registry.h"
 #include <lnos/protocol.h>
 #include <lnos/config.h>
 
-constexpr std::size_t RECV_BUFFER_SIZE = 1024;
+class FdGuard {
+    int fd_;
+public:
+    explicit FdGuard(int fd = -1) : fd_(fd) {}
+    ~FdGuard() {
+        if (fd_ >= 0) {
+            ::close(fd_);
+        }
+    }
+    FdGuard(const FdGuard&) = delete;
+    FdGuard& operator=(const FdGuard&) = delete;
+
+    FdGuard(FdGuard&& other) noexcept : fd_(other.fd_) {
+        other.fd_ = -1;
+    }
+    FdGuard& operator=(FdGuard&& other) noexcept {
+        if (this != &other) {
+            if (fd_ >= 0) ::close(fd_);
+            fd_ = other.fd_;
+            other.fd_ = -1;
+        }
+        return *this;
+    }
+
+    int get() const noexcept { return fd_; }
+    void reset(int fd = -1) noexcept {
+        if (fd_ >= 0) ::close(fd_);
+        fd_ = fd;
+    }
+    int release() noexcept {
+        int temp = fd_;
+        fd_ = -1;
+        return temp;
+    }
+    operator int() const noexcept { return fd_; }
+};
+
+constexpr std::size_t RECV_BUFFER_SIZE = 4096;
 constexpr int ANNOUNCE_INTERVAL_SECONDS = 2;
 constexpr int NODE_TTL_SECONDS = 15;
-
 constexpr int QUERY_WAIT_MS = 400;
 constexpr int MAX_ACTIVE_QUERIES = 64;
-constexpr int MAX_PACKETS_PER_SECOND = 200;
-std::atomic<int> activeQueries(0);
-std::atomic<bool> running = true;
 
 struct InterfaceInfo {
     std::string name;
@@ -43,192 +80,313 @@ struct InterfaceInfo {
     bool has_ipv6 = false;
 };
 
-InterfaceInfo detectInterface() {
-    struct ifaddrs* ifaddr = nullptr;
-    if (getifaddrs(&ifaddr) == -1) {
+// Traits for IPv4 and IPv6 deduplication
+struct IPv4Traits {
+    using AddrType = sockaddr_in;
+    using TtlType = unsigned char;
+    static constexpr int Family = AF_INET;
+    static constexpr int Proto = IPPROTO_IP;
+    static constexpr int MulticastTtlOpt = IP_MULTICAST_TTL;
+    static constexpr int MulticastLoopOpt = IP_MULTICAST_LOOP;
+    static constexpr int MulticastIfOpt = IP_MULTICAST_IF;
+    static constexpr int AddMembershipOpt = IP_ADD_MEMBERSHIP;
+
+    static std::string getMcastGroup(const lnos::Config& cfg) { return cfg.mcastGroup; }
+
+    static void setIf(int sock, const std::string& myIp, unsigned int ifindex) {
+        in_addr localIf{};
+        if (inet_pton(AF_INET, myIp.c_str(), &localIf) == 1) {
+            setsockopt(sock, IPPROTO_IP, IP_MULTICAST_IF, &localIf, sizeof(localIf));
+        }
+    }
+
+    static bool joinGroup(int sock, const std::string& mcastGroup, const std::string& myIp, unsigned int ifindex) {
+        ip_mreq mreq{};
+        if (inet_pton(AF_INET, mcastGroup.c_str(), &mreq.imr_multiaddr) != 1) return false;
+        if (inet_pton(AF_INET, myIp.c_str(), &mreq.imr_interface) != 1) return false;
+        return setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) >= 0;
+    }
+
+    static bool parseAddr(const std::string& ipStr, uint16_t port, sockaddr_in& addr) {
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        return inet_pton(AF_INET, ipStr.c_str(), &addr.sin_addr) == 1;
+    }
+
+    static std::string ntop(const sockaddr_in& addr) {
+        char ip[INET_ADDRSTRLEN];
+        if (inet_ntop(AF_INET, &addr.sin_addr, ip, sizeof(ip)) == nullptr) return {};
+        return ip;
+    }
+
+    static constexpr size_t AddrSize = sizeof(sockaddr_in);
+};
+
+struct IPv6Traits {
+    using AddrType = sockaddr_in6;
+    using TtlType = int;
+    static constexpr int Family = AF_INET6;
+    static constexpr int Proto = IPPROTO_IPV6;
+    static constexpr int MulticastTtlOpt = IPV6_MULTICAST_HOPS;
+    static constexpr int MulticastLoopOpt = IPV6_MULTICAST_LOOP;
+    static constexpr int MulticastIfOpt = IPV6_MULTICAST_IF;
+    static constexpr int AddMembershipOpt = IPV6_ADD_MEMBERSHIP;
+
+    static std::string getMcastGroup(const lnos::Config& cfg) { return cfg.mcastGroupV6; }
+
+    static void setIf(int sock, const std::string& myIp, unsigned int ifindex) {
+        setsockopt(sock, IPPROTO_IPV6, IPV6_MULTICAST_IF, &ifindex, sizeof(ifindex));
+    }
+
+    static bool joinGroup(int sock, const std::string& mcastGroup, const std::string& myIp, unsigned int ifindex) {
+        ipv6_mreq mreq{};
+        if (inet_pton(AF_INET6, mcastGroup.c_str(), &mreq.ipv6mr_multiaddr) != 1) return false;
+        mreq.ipv6mr_interface = ifindex;
+        return setsockopt(sock, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) >= 0;
+    }
+
+    static bool parseAddr(const std::string& ipStr, uint16_t port, sockaddr_in6& addr) {
+        addr.sin6_family = AF_INET6;
+        addr.sin6_port = htons(port);
+        return inet_pton(AF_INET6, ipStr.c_str(), &addr.sin6_addr) == 1;
+    }
+
+    static std::string ntop(const sockaddr_in6& addr) {
+        char ip[INET6_ADDRSTRLEN];
+        if (inet_ntop(AF_INET6, &addr.sin6_addr, ip, sizeof(ip)) == nullptr) return {};
+        return ip;
+    }
+
+    static constexpr size_t AddrSize = sizeof(sockaddr_in6);
+};
+
+class Daemon {
+public:
+    std::atomic<bool> running{true};
+    std::atomic<int> activeQueries{0};
+
+    // Atomic Metrics
+    std::atomic<uint64_t> queriesResolved{0};
+    std::atomic<uint64_t> queriesFailed{0};
+    std::atomic<uint64_t> packetsReceived{0};
+    std::atomic<uint64_t> packetsDropped{0};
+    std::atomic<uint64_t> packetsRejectedSig{0};
+
+    lnos::Config cfg;
+    InterfaceInfo interfaceInfo;
+
+    std::array<uint8_t, PRIVATE_KEY_SIZE> privateKey;
+    std::array<uint8_t, PUBLIC_KEY_SIZE> publicKey;
+
+    std::shared_mutex nodesMutex;
+    std::mutex coutMutex;
+
+    Daemon() {
+        if (sodium_init() < 0) {
+            throw std::runtime_error("Failed to initialize libsodium");
+        }
+    }
+
+    void loadKeys() {
+        privateKey = lnos::loadPrivateKey();
+        publicKey = lnos::loadPublicKey();
+    }
+
+    InterfaceInfo detectInterface() {
+        struct ifaddrs* ifaddr = nullptr;
+        if (getifaddrs(&ifaddr) == -1) {
+            return {};
+        }
+
+        auto extractAddresses = [&](const std::string& name, InterfaceInfo& info) {
+            for (struct ifaddrs* ifa2 = ifaddr; ifa2 != nullptr; ifa2 = ifa2->ifa_next) {
+                if (!ifa2->ifa_addr || std::string(ifa2->ifa_name) != name) continue;
+                if (ifa2->ifa_addr->sa_family == AF_INET) {
+                    char host[NI_MAXHOST];
+                    if (getnameinfo(ifa2->ifa_addr, sizeof(struct sockaddr_in), host, NI_MAXHOST, nullptr, 0, NI_NUMERICHOST) == 0) {
+                        info.ipv4 = host;
+                        info.has_ipv4 = true;
+                    }
+                } else if (ifa2->ifa_addr->sa_family == AF_INET6) {
+                    char host[NI_MAXHOST];
+                    if (getnameinfo(ifa2->ifa_addr, sizeof(struct sockaddr_in6), host, NI_MAXHOST, nullptr, 0, NI_NUMERICHOST) == 0) {
+                        std::string s(host);
+                        auto pos = s.find('%');
+                        if (pos != std::string::npos) {
+                            s = s.substr(0, pos);
+                        }
+                        info.ipv6 = s;
+                        info.has_ipv6 = true;
+                    }
+                }
+            }
+        };
+
+        // Pass 1: find non-loopback active interfaces
+        for (struct ifaddrs* ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+            if (!ifa->ifa_addr) continue;
+            if (!(ifa->ifa_flags & IFF_UP) || !(ifa->ifa_flags & IFF_RUNNING)) continue;
+            if (ifa->ifa_flags & IFF_LOOPBACK) continue;
+
+            InterfaceInfo info;
+            info.name = ifa->ifa_name;
+            info.index = if_nametoindex(ifa->ifa_name);
+
+            extractAddresses(info.name, info);
+
+            if (info.has_ipv4 || info.has_ipv6) {
+                freeifaddrs(ifaddr);
+                return info;
+            }
+        }
+
+        // Pass 2: fallback to loopback
+        for (struct ifaddrs* ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+            if (!ifa->ifa_addr) continue;
+            if (!(ifa->ifa_flags & IFF_UP) || !(ifa->ifa_flags & IFF_RUNNING)) continue;
+            if (!(ifa->ifa_flags & IFF_LOOPBACK)) continue;
+
+            InterfaceInfo info;
+            info.name = ifa->ifa_name;
+            info.index = if_nametoindex(ifa->ifa_name);
+
+            extractAddresses(info.name, info);
+
+            if (info.has_ipv4 || info.has_ipv6) {
+                freeifaddrs(ifaddr);
+                return info;
+            }
+        }
+
+        freeifaddrs(ifaddr);
         return {};
     }
 
-    auto extractAddresses = [&](const std::string& name, InterfaceInfo& info) {
-        for (struct ifaddrs* ifa2 = ifaddr; ifa2 != nullptr; ifa2 = ifa2->ifa_next) {
-            if (!ifa2->ifa_addr || std::string(ifa2->ifa_name) != name) continue;
-            if (ifa2->ifa_addr->sa_family == AF_INET) {
-                char host[NI_MAXHOST];
-                if (getnameinfo(ifa2->ifa_addr, sizeof(struct sockaddr_in), host, NI_MAXHOST, nullptr, 0, NI_NUMERICHOST) == 0) {
-                    info.ipv4 = host;
-                    info.has_ipv4 = true;
-                }
-            } else if (ifa2->ifa_addr->sa_family == AF_INET6) {
-                char host[NI_MAXHOST];
-                if (getnameinfo(ifa2->ifa_addr, sizeof(struct sockaddr_in6), host, NI_MAXHOST, nullptr, 0, NI_NUMERICHOST) == 0) {
-                    std::string s(host);
-                    auto pos = s.find('%');
-                    if (pos != std::string::npos) {
-                        s = s.substr(0, pos);
-                    }
-                    info.ipv6 = s;
-                    info.has_ipv6 = true;
-                }
-            }
-        }
-    };
-
-    // Pass 1: find non-loopback active interfaces
-    for (struct ifaddrs* ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
-        if (!ifa->ifa_addr) continue;
-        if (!(ifa->ifa_flags & IFF_UP) || !(ifa->ifa_flags & IFF_RUNNING)) continue;
-        if (ifa->ifa_flags & IFF_LOOPBACK) continue;
-
-        InterfaceInfo info;
-        info.name = ifa->ifa_name;
-        info.index = if_nametoindex(ifa->ifa_name);
-
-        extractAddresses(info.name, info);
-
-        if (info.has_ipv4 || info.has_ipv6) {
-            freeifaddrs(ifaddr);
-            return info;
-        }
-    }
-
-    // Pass 2: fallback to loopback
-    for (struct ifaddrs* ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
-        if (!ifa->ifa_addr) continue;
-        if (!(ifa->ifa_flags & IFF_UP) || !(ifa->ifa_flags & IFF_RUNNING)) continue;
-        if (!(ifa->ifa_flags & IFF_LOOPBACK)) continue;
-
-        InterfaceInfo info;
-        info.name = ifa->ifa_name;
-        info.index = if_nametoindex(ifa->ifa_name);
-
-        extractAddresses(info.name, info);
-
-        if (info.has_ipv4 || info.has_ipv6) {
-            freeifaddrs(ifaddr);
-            return info;
-        }
-    }
-
-    freeifaddrs(ifaddr);
-    return {};
-}
-
-void handleSigint(int) {
-    std::cout << "CTRL+C received\n";
-    running = false;
-}
-
-std::shared_mutex nodesMutex;
-std::mutex coutMutex;
-
-lnos::Config cfg;
-InterfaceInfo interfaceInfo;
-
-void updateOwnersDB();
-
-void stopWithError(const std::string& message) {
-    if (!running.exchange(false))
-        return;
-
-    std::cerr << "[fatal] " << message << "\n"
-              << "LNOS will now shut down.\n";
-}
-
-void stopAfterSystemError(const char* operation) {
-    perror(operation);
-    stopWithError(std::string("Network operation failed: ") + operation);
-}
-
-void sendMulticastQuery(const std::string& target_name) {
-    static bool keys_loaded = false;
-    static std::array<uint8_t, PRIVATE_KEY_SIZE> privateKey;
-    static std::array<uint8_t, PUBLIC_KEY_SIZE> publicKey;
-
-    if (!keys_loaded) {
-        try {
-            privateKey = lnos::loadPrivateKey();
-            publicKey = lnos::loadPublicKey();
-            keys_loaded = true;
-        } catch (const std::exception& e) {
-            std::cerr << "[error] sendMulticastQuery: " << e.what() << "\n";
+    void stopWithError(const std::string& message) {
+        if (!running.exchange(false))
             return;
-        } catch (...) {
-            std::cerr << "[error] sendMulticastQuery: unknown error loading keys\n";
-            return;
-        }
+
+        std::cerr << "[fatal] " << message << "\n"
+                  << "LNOS will now shut down.\n";
     }
 
-    lnos::Packet p(target_name, {});
-    p.type = lnos::PacketType::Query;
-    p.publicKey = publicKey;
-
-    if (!lnos::signPacket(p, privateKey)) {
-        return;
+    void stopAfterSystemError(const char* operation) {
+        perror(operation);
+        stopWithError(std::string("Network operation failed: ") + operation);
     }
 
-    lnos::Blob msg = lnos::encode(p, true);
-
-    // Send IPv4
-    int sock4 = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sock4 >= 0) {
-        unsigned char ttl = 1;
-        setsockopt(sock4, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
-        if (interfaceInfo.has_ipv4) {
-            in_addr localIf{};
-            if (inet_pton(AF_INET, interfaceInfo.ipv4.c_str(), &localIf) == 1) {
-                setsockopt(sock4, IPPROTO_IP, IP_MULTICAST_IF, &localIf, sizeof(localIf));
-            }
-        }
-        sockaddr_in addr4{};
-        addr4.sin_family = AF_INET;
-        addr4.sin_port = htons(cfg.port);
-        if (inet_pton(AF_INET, cfg.mcastGroup.c_str(), &addr4.sin_addr) == 1) {
-            sendto(sock4, msg.data(), msg.size(), 0, reinterpret_cast<sockaddr*>(&addr4), sizeof(addr4));
-        }
-        close(sock4);
-    }
-
-    // Send IPv6
-    int sock6 = socket(AF_INET6, SOCK_DGRAM, 0);
-    if (sock6 >= 0) {
-        int hops = 1;
-        setsockopt(sock6, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &hops, sizeof(hops));
-        if (interfaceInfo.has_ipv6) {
-            setsockopt(sock6, IPPROTO_IPV6, IPV6_MULTICAST_IF, &interfaceInfo.index, sizeof(interfaceInfo.index));
-        }
-        sockaddr_in6 addr6{};
-        addr6.sin6_family = AF_INET6;
-        addr6.sin6_port = htons(cfg.port);
-        if (inet_pton(AF_INET6, cfg.mcastGroupV6.c_str(), &addr6.sin6_addr) == 1) {
-            sendto(sock6, msg.data(), msg.size(), 0, reinterpret_cast<sockaddr*>(&addr6), sizeof(addr6));
-        }
-        close(sock6);
-    }
-}
-
-void handle_client(int client) {
-    char buf[256];
-    ssize_t n = read(client, buf, sizeof(buf) - 1);
-    if (n > 0) {
-        buf[n] = '\0';
-        std::string qname(buf);
-        while (!qname.empty() && (qname.back() == '\n' || qname.back() == '\r')) {
-            qname.pop_back();
-        }
-
-        std::string resolved_ip = "NOT_FOUND";
-
+    void updateOwnersDB() {
+        std::set<std::string> owners;
         {
             std::shared_lock<std::shared_mutex> lock(nodesMutex);
-            auto it = nodes.find(qname);
-            if (it != nodes.end() && it->second.status == NodeStatus::Online) {
-                resolved_ip = it->second.ip;
+            for (const auto& n : nodes) {
+                auto dot = n.first.find_last_of('.');
+                if (dot != std::string::npos && dot + 1 < n.first.size()) {
+                    owners.insert(n.first.substr(dot + 1));
+                }
             }
         }
 
-        if (resolved_ip == "NOT_FOUND") {
-            sendMulticastQuery(qname);
-            std::this_thread::sleep_for(std::chrono::milliseconds(QUERY_WAIT_MS));
+        std::string path = lnos::getConfigDir() + "/owners.db";
+        std::string tmp = path + ".tmp";
+
+        std::ofstream f(tmp);
+        if (!f.is_open()) return;
+        for (const auto& o : owners) {
+            f << o << "\n";
+        }
+        f.close();
+
+        std::error_code ec;
+        std::filesystem::permissions(tmp,
+            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write |
+            std::filesystem::perms::group_read | std::filesystem::perms::others_read,
+            std::filesystem::perm_options::replace, ec);
+        std::filesystem::rename(tmp, path, ec);
+    }
+
+    void sendMulticastQuery(const std::string& target_name) {
+        lnos::Packet p(target_name, {});
+        p.type = lnos::PacketType::Query;
+        p.publicKey = publicKey;
+
+        if (!lnos::signPacket(p, privateKey)) {
+            return;
+        }
+
+        // Encrypt the payload as multicast (which will use crypto_secretbox symmetrically based on our own publicKey)
+        if (!lnos::encryptPacketPayload(p, privateKey, publicKey, true)) {
+            return;
+        }
+
+        lnos::Blob msg = lnos::encode(p, true);
+
+        // Send IPv4
+        if (interfaceInfo.has_ipv4) {
+            FdGuard sock4(socket(AF_INET, SOCK_DGRAM, 0));
+            if (sock4 >= 0) {
+                unsigned char ttl = 1;
+                setsockopt(sock4, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
+                in_addr localIf{};
+                if (inet_pton(AF_INET, interfaceInfo.ipv4.c_str(), &localIf) == 1) {
+                    setsockopt(sock4, IPPROTO_IP, IP_MULTICAST_IF, &localIf, sizeof(localIf));
+                }
+                sockaddr_in addr4{};
+                addr4.sin_family = AF_INET;
+                addr4.sin_port = htons(cfg.port);
+                if (inet_pton(AF_INET, cfg.mcastGroup.c_str(), &addr4.sin_addr) == 1) {
+                    sendto(sock4, msg.data(), msg.size(), 0, reinterpret_cast<sockaddr*>(&addr4), sizeof(addr4));
+                }
+            }
+        }
+
+        // Send IPv6
+        if (interfaceInfo.has_ipv6) {
+            FdGuard sock6(socket(AF_INET6, SOCK_DGRAM, 0));
+            if (sock6 >= 0) {
+                int hops = 1;
+                setsockopt(sock6, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &hops, sizeof(hops));
+                setsockopt(sock6, IPPROTO_IPV6, IPV6_MULTICAST_IF, &interfaceInfo.index, sizeof(interfaceInfo.index));
+                sockaddr_in6 addr6{};
+                addr6.sin6_family = AF_INET6;
+                addr6.sin6_port = htons(cfg.port);
+                if (inet_pton(AF_INET6, cfg.mcastGroupV6.c_str(), &addr6.sin6_addr) == 1) {
+                    sendto(sock6, msg.data(), msg.size(), 0, reinterpret_cast<sockaddr*>(&addr6), sizeof(addr6));
+                }
+            }
+        }
+    }
+
+    void handle_client(int client) {
+        FdGuard clientGuard(client);
+        char buf[256];
+        ssize_t n = read(client, buf, sizeof(buf) - 1);
+        if (n > 0) {
+            buf[n] = '\0';
+            std::string qname(buf);
+            while (!qname.empty() && (qname.back() == '\n' || qname.back() == '\r')) {
+                qname.pop_back();
+            }
+
+            // Stats request
+            if (qname == "__STATS__") {
+                std::stringstream ss;
+                ss << "queriesResolved=" << queriesResolved.load() << "\n"
+                   << "queriesFailed=" << queriesFailed.load() << "\n"
+                   << "packetsReceived=" << packetsReceived.load() << "\n"
+                   << "packetsDropped=" << packetsDropped.load() << "\n"
+                   << "packetsRejectedSig=" << packetsRejectedSig.load() << "\n";
+                {
+                    std::shared_lock<std::shared_mutex> lock(nodesMutex);
+                    ss << "nodeCount=" << nodes.size() << "\n";
+                }
+                std::string resp = ss.str();
+                write(client, resp.data(), resp.length());
+                return;
+            }
+
+            std::string resolved_ip = "NOT_FOUND";
+
             {
                 std::shared_lock<std::shared_mutex> lock(nodesMutex);
                 auto it = nodes.find(qname);
@@ -236,553 +394,646 @@ void handle_client(int client) {
                     resolved_ip = it->second.ip;
                 }
             }
+
+            if (resolved_ip == "NOT_FOUND") {
+                sendMulticastQuery(qname);
+                std::this_thread::sleep_for(std::chrono::milliseconds(QUERY_WAIT_MS));
+                {
+                    std::shared_lock<std::shared_mutex> lock(nodesMutex);
+                    auto it = nodes.find(qname);
+                    if (it != nodes.end() && it->second.status == NodeStatus::Online) {
+                        resolved_ip = it->second.ip;
+                    }
+                }
+            }
+
+            if (resolved_ip != "NOT_FOUND") {
+                queriesResolved++;
+            } else {
+                queriesFailed++;
+            }
+
+            std::string resp = resolved_ip + "\n";
+            write(client, resp.data(), resp.length());
+        }
+    }
+
+    void runQueryServer() {
+        FdGuard sock(socket(AF_UNIX, SOCK_STREAM, 0));
+        if (sock < 0) {
+            stopWithError("query_server: socket failed");
+            return;
         }
 
-        std::string resp = resolved_ip + "\n";
-        write(client, resp.data(), resp.length());
-    }
-    close(client);
-}
-
-void query_server() {
-    int sock = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (sock < 0) {
-        stopWithError("query_server: socket failed");
-        return;
-    }
-
-    struct sockaddr_un un{};
-    un.sun_family = AF_UNIX;
-    std::string socket_path = lnos::getConfigDir() + "/lnosd.sock";
-    std::strncpy(un.sun_path, socket_path.c_str(), sizeof(un.sun_path) - 1);
-    un.sun_path[sizeof(un.sun_path) - 1] = '\0';
-    unlink(un.sun_path);
-
-    if (bind(sock, reinterpret_cast<sockaddr*>(&un), sizeof(un)) < 0) {
-        stopWithError("query_server: bind failed to " + socket_path);
-        close(sock);
-        return;
-    }
-
-    if (listen(sock, 128) < 0) {
-        stopWithError("query_server: listen failed");
+        struct sockaddr_un un{};
+        un.sun_family = AF_UNIX;
+        std::string socket_path = lnos::getConfigDir() + "/lnosd.sock";
+        std::strncpy(un.sun_path, socket_path.c_str(), sizeof(un.sun_path) - 1);
+        un.sun_path[sizeof(un.sun_path) - 1] = '\0';
         unlink(un.sun_path);
-        close(sock);
-        return;
-    }
 
-    timeval tv{};
-    tv.tv_sec = 1;
-    tv.tv_usec = 0;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-    while (running) {
-        int client = accept(sock, nullptr, nullptr);
-        if (client < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-                continue;
-            }
-            break;
+        if (bind(sock, reinterpret_cast<sockaddr*>(&un), sizeof(un)) < 0) {
+            stopWithError("query_server: bind failed to " + socket_path);
+            return;
         }
 
-        if (activeQueries >= MAX_ACTIVE_QUERIES) {
-            close(client);
-            continue;
-        }
-        activeQueries++;
-        std::thread t([client]() {
-            handle_client(client);
-            activeQueries--;
-        });
-        t.detach();
-    }
+        // Give socket proper permissions so other users can resolve names
+        chmod(un.sun_path, 0666);
 
-    unlink(un.sun_path);
-    close(sock);
-}
-
-
-void sender_ipv4(std::string myIp) {
-    int sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sock < 0) {
-        stopAfterSystemError("sender_ipv4 socket");
-        return;
-    }
-
-    unsigned char ttl = 1;
-    if (setsockopt(sock, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl)) < 0) {
-        stopAfterSystemError("sender_ipv4 IP_MULTICAST_TTL");
-        close(sock);
-        return;
-    }
-
-    int loop = 1;
-    if (setsockopt(sock, IPPROTO_IP, IP_MULTICAST_LOOP, &loop, sizeof(loop)) < 0) {
-        stopAfterSystemError("sender_ipv4 IP_MULTICAST_LOOP");
-        close(sock);
-        return;
-    }
-
-    in_addr localInterface{};
-    if (inet_pton(AF_INET, myIp.c_str(), &localInterface) != 1) {
-        stopWithError("sender_ipv4: Invalid local IPv4 address '" + myIp + "'");
-        close(sock);
-        return;
-    }
-
-    if (setsockopt(sock, IPPROTO_IP, IP_MULTICAST_IF, &localInterface, sizeof(localInterface)) < 0) {
-        stopAfterSystemError("sender_ipv4 IP_MULTICAST_IF");
-        close(sock);
-        return;
-    }
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(cfg.port);
-    if (inet_pton(AF_INET, cfg.mcastGroup.c_str(), &addr.sin_addr) != 1) {
-        stopWithError("sender_ipv4: Invalid multicast address '" + cfg.mcastGroup + "'");
-        close(sock);
-        return;
-    }
-
-    std::array<uint8_t, PRIVATE_KEY_SIZE> privateKey;
-    std::array<uint8_t, PUBLIC_KEY_SIZE> publicKey;
-    try {
-        privateKey = lnos::loadPrivateKey();
-        publicKey = lnos::loadPublicKey();
-    } catch (const std::exception& e) {
-        stopWithError("sender_ipv4: failed to load keys: " + std::string(e.what()));
-        close(sock);
-        return;
-    }
-
-    while (running) {
-        lnos::Packet p(cfg.name, cfg.services);
-        p.type = lnos::PacketType::Announce;
-        p.publicKey = publicKey;
-
-        if (!lnos::signPacket(p, privateKey)) {
-            stopWithError("sender_ipv4: Packet signing failed");
-            break;
+        if (listen(sock, 128) < 0) {
+            stopWithError("query_server: listen failed");
+            unlink(un.sun_path);
+            return;
         }
 
-        lnos::Blob msg = lnos::encode(p, true);
+        timeval tv{};
+        tv.tv_sec = 1;
+        tv.tv_usec = 0;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-#ifndef NDEBUG
-        {
-            std::lock_guard<std::mutex> lock(coutMutex);
-            std::cout << "[debug] sender_ipv4: sending " << msg.size() << " bytes\n";
-        }
-#endif
-
-        if (sendto(sock, msg.data(), msg.size(), 0, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-            stopAfterSystemError("sender_ipv4 sendto");
-            break;
-        }
-
-        std::this_thread::sleep_for(std::chrono::seconds(ANNOUNCE_INTERVAL_SECONDS));
-    }
-
-    close(sock);
-}
-
-void receiver_ipv4(std::string myIp) {
-    int sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sock < 0) {
-        stopAfterSystemError("receiver_ipv4 socket");
-        return;
-    }
-
-    int reuse = 1;
-    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
-        stopAfterSystemError("receiver_ipv4 SO_REUSEADDR");
-        close(sock);
-        return;
-    }
-
-    timeval tv{};
-    tv.tv_sec = 1;
-    tv.tv_usec = 0;
-    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
-        stopAfterSystemError("receiver_ipv4 SO_RCVTIMEO");
-        close(sock);
-        return;
-    }
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(cfg.port);
-    addr.sin_addr.s_addr = INADDR_ANY;
-
-    if (bind(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-        stopAfterSystemError("receiver_ipv4 bind");
-        close(sock);
-        return;
-    }
-
-    ip_mreq mreq{};
-    if (inet_pton(AF_INET, cfg.mcastGroup.c_str(), &mreq.imr_multiaddr) != 1) {
-        stopWithError("receiver_ipv4: Invalid multicast address");
-        close(sock);
-        return;
-    }
-
-    if (inet_pton(AF_INET, myIp.c_str(), &mreq.imr_interface) != 1) {
-        stopWithError("receiver_ipv4: Invalid local address");
-        close(sock);
-        return;
-    }
-
-    if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
-        stopAfterSystemError("receiver_ipv4 IP_ADD_MEMBERSHIP");
-        close(sock);
-        return;
-    }
-
-    char buffer[RECV_BUFFER_SIZE];
-
-    while (running) {
-        sockaddr_in senderAddr{};
-        socklen_t senderLen = sizeof(senderAddr);
-
-        ssize_t len = recvfrom(sock, buffer, sizeof(buffer) - 1, 0, reinterpret_cast<sockaddr*>(&senderAddr), &senderLen);
-        if (len < 0) {
-            if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-                stopAfterSystemError("receiver_ipv4 recvfrom");
-                break;
-            }
-            continue;
-        }
-
-        if (len == 0) continue;
-
-        buffer[len] = 0;
-
-        char ip[INET_ADDRSTRLEN];
-        if (inet_ntop(AF_INET, &senderAddr.sin_addr, ip, sizeof(ip)) == nullptr) {
-            stopAfterSystemError("receiver_ipv4 inet_ntop");
-            break;
-        }
-
-#ifndef NDEBUG
-        {
-            std::lock_guard<std::mutex> lock(coutMutex);
-            std::cout << "[debug] receiver_ipv4: received " << len << " bytes from " << ip << "\n";
-        }
-#endif
-
-        // Rate limiting: max MAX_PACKETS_PER_SECOND packets/sec
-        {
-            static auto lastReset = std::chrono::steady_clock::now();
-            static int count = 0;
-            auto now = std::chrono::steady_clock::now();
-            if (now - lastReset > std::chrono::seconds(1)) {
-                count = 0;
-                lastReset = now;
-            }
-            if (++count > MAX_PACKETS_PER_SECOND)
-                continue;
-        }
-
-        lnos::EncodedPacket encoded((uint8_t *) buffer, len);
-        lnos::Packet p;
-        if (lnos::decode(encoded, p)) {
-            if (!lnos::verifyPacket(p)) {
-                std::cerr << "[error] receiver_ipv4: packet signature verification failed\n";
-                continue;
-            }
-
-            if (p.type == lnos::PacketType::Query) {
-                if (p.announce.name == cfg.name) {
-                    try {
-                        auto privateKey = lnos::loadPrivateKey();
-                        auto publicKey = lnos::loadPublicKey();
-                        lnos::Packet resp(cfg.name, cfg.services);
-                        resp.type = lnos::PacketType::Response;
-                        resp.publicKey = publicKey;
-                        if (lnos::signPacket(resp, privateKey)) {
-                            lnos::Blob resp_msg = lnos::encode(resp, true);
-                            sendto(sock, resp_msg.data(), resp_msg.size(), 0, reinterpret_cast<sockaddr*>(&senderAddr), senderLen);
-                        }
-                    } catch (const std::exception& e) {
-                        std::cerr << "[error] receiver_ipv4: response failed: " << e.what() << "\n";
-                    } catch (...) {
-                        std::cerr << "[error] receiver_ipv4: response failed (unknown)\n";
-                    }
-                }
-            } else if (p.type == lnos::PacketType::Announce || p.type == lnos::PacketType::Response) {
-                std::unique_lock<std::shared_mutex> lock(nodesMutex);
-                const auto& announce = p.announce;
-                auto it = nodes.find(announce.name);
-                if (it != nodes.end()) {
-                    if (it->second.publicKey != p.publicKey) {
-                        std::cerr << "[error] receiver_ipv4: public key mismatch for node '" << announce.name << "', rejecting (C-2 prevention)\n";
-                        continue;
-                    }
-                } else if (nodes.size() >= 1000) {
-                    std::cerr << "[warning] receiver_ipv4: registry full (1000 limit), ignoring node '" << announce.name << "'\n";
+        while (running) {
+            int client = accept(sock, nullptr, nullptr);
+            if (client < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
                     continue;
                 }
-                nodes[announce.name] = {
-                    announce.name,
-                    ip,
-                    announce.services,
-                    std::chrono::steady_clock::now(),
-                    NodeStatus::Online,
-                    p.publicKey
-                };
-                updateOwnersDB();
-            }
-        } else {
-            std::cerr << "[error] receiver_ipv4: received invalid packet\n";
-        }
-    }
-
-    close(sock);
-}
-
-void sender_ipv6(unsigned int ifindex) {
-    int sock = socket(AF_INET6, SOCK_DGRAM, 0);
-    if (sock < 0) {
-        stopAfterSystemError("sender_ipv6 socket");
-        return;
-    }
-
-    int hops = 1;
-    if (setsockopt(sock, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &hops, sizeof(hops)) < 0) {
-        stopAfterSystemError("sender_ipv6 IPV6_MULTICAST_HOPS");
-        close(sock);
-        return;
-    }
-
-    int loop = 1;
-    if (setsockopt(sock, IPPROTO_IPV6, IPV6_MULTICAST_LOOP, &loop, sizeof(loop)) < 0) {
-        stopAfterSystemError("sender_ipv6 IPV6_MULTICAST_LOOP");
-        close(sock);
-        return;
-    }
-
-    if (setsockopt(sock, IPPROTO_IPV6, IPV6_MULTICAST_IF, &ifindex, sizeof(ifindex)) < 0) {
-        stopAfterSystemError("sender_ipv6 IPV6_MULTICAST_IF");
-        close(sock);
-        return;
-    }
-
-    sockaddr_in6 addr{};
-    addr.sin6_family = AF_INET6;
-    addr.sin6_port = htons(cfg.port);
-    if (inet_pton(AF_INET6, cfg.mcastGroupV6.c_str(), &addr.sin6_addr) != 1) {
-        stopWithError("sender_ipv6: Invalid multicast address '" + cfg.mcastGroupV6 + "'");
-        close(sock);
-        return;
-    }
-
-    std::array<uint8_t, PRIVATE_KEY_SIZE> privateKey;
-    std::array<uint8_t, PUBLIC_KEY_SIZE> publicKey;
-    try {
-        privateKey = lnos::loadPrivateKey();
-        publicKey = lnos::loadPublicKey();
-    } catch (const std::exception& e) {
-        stopWithError("sender_ipv6: failed to load keys: " + std::string(e.what()));
-        close(sock);
-        return;
-    }
-
-    while (running) {
-        lnos::Packet p(cfg.name, cfg.services);
-        p.type = lnos::PacketType::Announce;
-        p.publicKey = publicKey;
-
-        if (!lnos::signPacket(p, privateKey)) {
-            stopWithError("sender_ipv6: Packet signing failed");
-            break;
-        }
-
-        lnos::Blob msg = lnos::encode(p, true);
-
-#ifndef NDEBUG
-        {
-            std::lock_guard<std::mutex> lock(coutMutex);
-            std::cout << "[debug] sender_ipv6: sending " << msg.size() << " bytes\n";
-        }
-#endif
-
-        if (sendto(sock, msg.data(), msg.size(), 0, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-            stopAfterSystemError("sender_ipv6 sendto");
-            break;
-        }
-
-        std::this_thread::sleep_for(std::chrono::seconds(ANNOUNCE_INTERVAL_SECONDS));
-    }
-
-    close(sock);
-}
-
-void receiver_ipv6(unsigned int ifindex) {
-    int sock = socket(AF_INET6, SOCK_DGRAM, 0);
-    if (sock < 0) {
-        stopAfterSystemError("receiver_ipv6 socket");
-        return;
-    }
-
-    int reuse = 1;
-    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
-        stopAfterSystemError("receiver_ipv6 SO_REUSEADDR");
-        close(sock);
-        return;
-    }
-
-    int v6only = 1;
-    if (setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only)) < 0) {
-        stopAfterSystemError("receiver_ipv6 IPV6_V6ONLY");
-        close(sock);
-        return;
-    }
-
-    timeval tv{};
-    tv.tv_sec = 1;
-    tv.tv_usec = 0;
-    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
-        stopAfterSystemError("receiver_ipv6 SO_RCVTIMEO");
-        close(sock);
-        return;
-    }
-
-    sockaddr_in6 addr{};
-    addr.sin6_family = AF_INET6;
-    addr.sin6_port = htons(cfg.port);
-    addr.sin6_addr = in6addr_any;
-
-    if (bind(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-        stopAfterSystemError("receiver_ipv6 bind");
-        close(sock);
-        return;
-    }
-
-    ipv6_mreq mreq{};
-    if (inet_pton(AF_INET6, cfg.mcastGroupV6.c_str(), &mreq.ipv6mr_multiaddr) != 1) {
-        stopWithError("receiver_ipv6: Invalid multicast address");
-        close(sock);
-        return;
-    }
-    mreq.ipv6mr_interface = ifindex;
-
-    if (setsockopt(sock, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
-        stopAfterSystemError("receiver_ipv6 IPV6_ADD_MEMBERSHIP");
-        close(sock);
-        return;
-    }
-
-    char buffer[RECV_BUFFER_SIZE];
-
-    while (running) {
-        sockaddr_in6 senderAddr{};
-        socklen_t senderLen = sizeof(senderAddr);
-
-        ssize_t len = recvfrom(sock, buffer, sizeof(buffer) - 1, 0, reinterpret_cast<sockaddr*>(&senderAddr), &senderLen);
-        if (len < 0) {
-            if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-                stopAfterSystemError("receiver_ipv6 recvfrom");
                 break;
             }
-            continue;
+
+            if (activeQueries >= MAX_ACTIVE_QUERIES) {
+                close(client);
+                continue;
+            }
+            activeQueries++;
+            std::thread t([this, client]() {
+                handle_client(client);
+                activeQueries--;
+            });
+            t.detach();
         }
 
-        if (len == 0) continue;
+        unlink(un.sun_path);
+    }
 
-        buffer[len] = 0;
-
-        char ip[INET6_ADDRSTRLEN];
-        if (inet_ntop(AF_INET6, &senderAddr.sin6_addr, ip, sizeof(ip)) == nullptr) {
-            stopAfterSystemError("receiver_ipv6 inet_ntop");
-            break;
+    template <typename Traits>
+    void runSender(std::string myIp, unsigned int ifindex) {
+        FdGuard sock(socket(Traits::Family, SOCK_DGRAM, 0));
+        if (sock < 0) {
+            stopAfterSystemError("sender socket");
+            return;
         }
+
+        typename Traits::TtlType ttl = 1;
+        if (setsockopt(sock, Traits::Proto, Traits::MulticastTtlOpt, &ttl, sizeof(ttl)) < 0) {
+            stopAfterSystemError("sender TTL");
+            return;
+        }
+
+        int loop = 1;
+        if (setsockopt(sock, Traits::Proto, Traits::MulticastLoopOpt, &loop, sizeof(loop)) < 0) {
+            stopAfterSystemError("sender loopback");
+            return;
+        }
+
+        Traits::setIf(sock, myIp, ifindex);
+
+        typename Traits::AddrType addr{};
+        if (!Traits::parseAddr(Traits::getMcastGroup(cfg), cfg.port, addr)) {
+            stopWithError("sender: Invalid multicast address");
+            return;
+        }
+
+        while (running) {
+            lnos::Packet p(cfg.name, cfg.services);
+            p.type = lnos::PacketType::Announce;
+            p.publicKey = publicKey;
+
+            if (!lnos::signPacket(p, privateKey)) {
+                stopWithError("sender: Packet signing failed");
+                break;
+            }
+
+            // Encrypt the payload as multicast (symmetrically using sender's public key)
+            if (!lnos::encryptPacketPayload(p, privateKey, publicKey, true)) {
+                stopWithError("sender: Packet encryption failed");
+                break;
+            }
+
+            lnos::Blob msg = lnos::encode(p, true);
 
 #ifndef NDEBUG
-        {
-            std::lock_guard<std::mutex> lock(coutMutex);
-            std::cout << "[debug] receiver_ipv6: received " << len << " bytes from " << ip << "\n";
-        }
+            {
+                std::lock_guard<std::mutex> lock(coutMutex);
+                std::cout << "[debug] sender: sending " << msg.size() << " bytes\n";
+            }
 #endif
 
-        // Rate limiting: max MAX_PACKETS_PER_SECOND packets/sec
-        {
-            static auto lastReset = std::chrono::steady_clock::now();
-            static int count = 0;
-            auto now = std::chrono::steady_clock::now();
-            if (now - lastReset > std::chrono::seconds(1)) {
-                count = 0;
-                lastReset = now;
-            }
-            if (++count > MAX_PACKETS_PER_SECOND)
-                continue;
-        }
-
-        lnos::EncodedPacket encoded((uint8_t *) buffer, len);
-        lnos::Packet p;
-        if (lnos::decode(encoded, p)) {
-            if (!lnos::verifyPacket(p)) {
-                std::cerr << "[error] receiver_ipv6: packet signature verification failed\n";
-                continue;
+            if (sendto(sock, msg.data(), msg.size(), 0, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+                stopAfterSystemError("sender sendto");
+                break;
             }
 
-            if (p.type == lnos::PacketType::Query) {
-                if (p.announce.name == cfg.name) {
-                    try {
-                        auto privateKey = lnos::loadPrivateKey();
-                        auto publicKey = lnos::loadPublicKey();
-                        lnos::Packet resp(cfg.name, cfg.services);
-                        resp.type = lnos::PacketType::Response;
-                        resp.publicKey = publicKey;
-                        if (lnos::signPacket(resp, privateKey)) {
-                            lnos::Blob resp_msg = lnos::encode(resp, true);
-                            sendto(sock, resp_msg.data(), resp_msg.size(), 0, reinterpret_cast<sockaddr*>(&senderAddr), senderLen);
-                        }
-                    } catch (const std::exception& e) {
-                        std::cerr << "[error] receiver_ipv6: response failed: " << e.what() << "\n";
-                    } catch (...) {
-                        std::cerr << "[error] receiver_ipv6: response failed (unknown)\n";
-                    }
-                }
-            } else if (p.type == lnos::PacketType::Announce || p.type == lnos::PacketType::Response) {
-                std::unique_lock<std::shared_mutex> lock(nodesMutex);
-                const auto& announce = p.announce;
-                auto it = nodes.find(announce.name);
-                if (it != nodes.end()) {
-                    if (it->second.publicKey != p.publicKey) {
-                        std::cerr << "[error] receiver_ipv6: public key mismatch for node '" << announce.name << "', rejecting (C-2 prevention)\n";
-                        continue;
-                    }
-                } else if (nodes.size() >= 1000) {
-                    std::cerr << "[warning] receiver_ipv6: registry full (1000 limit), ignoring node '" << announce.name << "'\n";
-                    continue;
-                }
-                nodes[announce.name] = {
-                    announce.name,
-                    ip,
-                    announce.services,
-                    std::chrono::steady_clock::now(),
-                    NodeStatus::Online,
-                    p.publicKey
-                };
-                updateOwnersDB();
-            }
-        } else {
-            std::cerr << "[error] receiver_ipv6: received invalid packet\n";
+            std::this_thread::sleep_for(std::chrono::seconds(ANNOUNCE_INTERVAL_SECONDS));
         }
     }
 
-    close(sock);
-}
+    template <typename Traits>
+    void runReceiver(std::string myIp, unsigned int ifindex) {
+        FdGuard sock(socket(Traits::Family, SOCK_DGRAM, 0));
+        if (sock < 0) {
+            stopAfterSystemError("receiver socket");
+            return;
+        }
 
-void printer() {
-    while (running) {
+        int reuse = 1;
+        if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
+            stopAfterSystemError("receiver SO_REUSEADDR");
+            return;
+        }
 
-        {
-            std::shared_lock<std::shared_mutex> lock(nodesMutex);
+        // Dual-stack protection for IPv6
+        if constexpr (Traits::Family == AF_INET6) {
+            int v6only = 1;
+            if (setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only)) < 0) {
+                stopAfterSystemError("receiver IPV6_V6ONLY");
+                return;
+            }
+        }
 
-            std::cout << "=== LNOS NODES ===" << std::endl;
+        timeval tv{};
+        tv.tv_sec = 1;
+        tv.tv_usec = 0;
+        if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+            stopAfterSystemError("receiver SO_RCVTIMEO");
+            return;
+        }
 
+        typename Traits::AddrType addr{};
+        // Bind to ANY to receive multicast
+        if constexpr (Traits::Family == AF_INET) {
+            addr.sin_family = AF_INET;
+            addr.sin_port = htons(cfg.port);
+            addr.sin_addr.s_addr = INADDR_ANY;
+        } else {
+            addr.sin6_family = AF_INET6;
+            addr.sin6_port = htons(cfg.port);
+            addr.sin6_addr = in6addr_any;
+        }
+
+        if (bind(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+            stopAfterSystemError("receiver bind");
+            return;
+        }
+
+        if (!Traits::joinGroup(sock, Traits::getMcastGroup(cfg), myIp, ifindex)) {
+            stopAfterSystemError("receiver join multicast group");
+            return;
+        }
+
+        char buffer[RECV_BUFFER_SIZE];
+        std::unordered_map<std::string, int> perSource;
+        auto lastReset = std::chrono::steady_clock::now();
+
+        while (running) {
+            typename Traits::AddrType senderAddr{};
+            socklen_t senderLen = sizeof(senderAddr);
+
+            ssize_t len = recvfrom(sock, buffer, sizeof(buffer) - 1, 0, reinterpret_cast<sockaddr*>(&senderAddr), &senderLen);
+            if (len < 0) {
+                if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+                    stopAfterSystemError("receiver recvfrom");
+                    break;
+                }
+                continue;
+            }
+
+            if (len == 0) continue;
+
+            buffer[len] = 0;
+            packetsReceived++;
+
+            std::string srcIp = Traits::ntop(senderAddr);
+            if (srcIp.empty()) continue;
+
+#ifndef NDEBUG
+            {
+                std::lock_guard<std::mutex> lock(coutMutex);
+                std::cout << "[debug] receiver: received " << len << " bytes from " << srcIp << "\n";
+            }
+#endif
+
+            // Per-source rate limiting: max 50 packets/sec per source IP
+            auto now = std::chrono::steady_clock::now();
+            if (now - lastReset > std::chrono::seconds(1)) {
+                perSource.clear();
+                lastReset = now;
+            }
+            if (++perSource[srcIp] > 50) {
+                packetsDropped++;
+                continue;
+            }
+
+            lnos::EncodedPacket encoded((uint8_t *) buffer, len);
+            lnos::Packet p;
+            if (lnos::decode(encoded, p)) {
+                // Decrypt multicast packet if encrypted (type is Announce/Response/Query)
+                bool isMulticast = (p.type == lnos::PacketType::Announce || p.type == lnos::PacketType::Response || p.type == lnos::PacketType::Query);
+                if (p.isEncrypted) {
+                    if (!lnos::decryptPacketPayload(p, privateKey, p.publicKey, isMulticast)) {
+                        std::cerr << "[error] receiver: decryption failed for source IP: " << srcIp << "\n";
+                        continue;
+                    }
+                }
+
+                if (!lnos::verifyPacket(p)) {
+                    std::cerr << "[error] receiver: packet signature verification failed\n";
+                    packetsRejectedSig++;
+                    continue;
+                }
+
+                if (p.type == lnos::PacketType::Query) {
+                    if (p.announce.name == cfg.name) {
+                        try {
+                            lnos::Packet resp(cfg.name, cfg.services);
+                            resp.type = lnos::PacketType::Response;
+                            resp.publicKey = publicKey;
+                            if (lnos::signPacket(resp, privateKey)) {
+                                // Multicast responses are encrypted symmetrically
+                                if (lnos::encryptPacketPayload(resp, privateKey, publicKey, true)) {
+                                    lnos::Blob resp_msg = lnos::encode(resp, true);
+                                    sendto(sock, resp_msg.data(), resp_msg.size(), 0, reinterpret_cast<sockaddr*>(&senderAddr), senderLen);
+                                }
+                            }
+                        } catch (const std::exception& e) {
+                            std::cerr << "[error] receiver: response failed: " << e.what() << "\n";
+                        }
+                    }
+                } else if (p.type == lnos::PacketType::Announce || p.type == lnos::PacketType::Response) {
+                    bool updated = false;
+                    {
+                        std::unique_lock<std::shared_mutex> lock(nodesMutex);
+                        const auto& announce = p.announce;
+                        auto it = nodes.find(announce.name);
+                        if (it != nodes.end()) {
+                            if (it->second.publicKey != p.publicKey) {
+                                std::cerr << "[error] receiver: public key mismatch for node '" << announce.name << "', rejecting (C-2 prevention)\n";
+                                continue;
+                            }
+                        } else if (nodes.size() >= 1000) {
+                            std::cerr << "[warning] receiver: registry full (1000 limit), ignoring node '" << announce.name << "'\n";
+                            continue;
+                        }
+                        nodes[announce.name] = {
+                            announce.name,
+                            srcIp,
+                            announce.services,
+                            std::chrono::steady_clock::now(),
+                            NodeStatus::Online,
+                            p.publicKey
+                        };
+                        updated = true;
+                    }
+                    if (updated) {
+                        updateOwnersDB();
+                    }
+                } else if (p.type == lnos::PacketType::GossipRequest) {
+                    // GossipRequest is unicast (isMulticast = false)
+                    // Let's reply with a GossipResponse
+                    try {
+                        lnos::Packet resp;
+                        resp.type = lnos::PacketType::GossipResponse;
+                        resp.publicKey = publicKey;
+
+                        // Fill in our known nodes list (only Online nodes, max 100 to fit in limits)
+                        {
+                            std::shared_lock<std::shared_mutex> lock(nodesMutex);
+                            int limit = 0;
+                            for (const auto& pair : nodes) {
+                                if (pair.second.status == NodeStatus::Online) {
+                                    lnos::GossipNode gnode{
+                                        pair.second.name,
+                                        pair.second.ip,
+                                        pair.second.services,
+                                        pair.second.publicKey
+                                    };
+                                    resp.gossipNodes.push_back(gnode);
+                                    if (++limit >= 100) break;
+                                }
+                            }
+                        }
+
+                        if (lnos::signPacket(resp, privateKey)) {
+                            // Encrypt with recipient's public key (asymmetric)
+                            if (lnos::encryptPacketPayload(resp, privateKey, p.publicKey, false)) {
+                                lnos::Blob resp_msg = lnos::encode(resp, true);
+                                sendto(sock, resp_msg.data(), resp_msg.size(), 0, reinterpret_cast<sockaddr*>(&senderAddr), senderLen);
+                            }
+                        }
+                    } catch (const std::exception& e) {
+                        std::cerr << "[error] receiver: GossipResponse failed: " << e.what() << "\n";
+                    }
+                } else if (p.type == lnos::PacketType::GossipResponse) {
+                    // Merge Gossip nodes back into registry
+                    bool updated = false;
+                    {
+                        std::unique_lock<std::shared_mutex> lock(nodesMutex);
+                        for (const auto& gnode : p.gossipNodes) {
+                            if (gnode.name == cfg.name) continue; // Don't merge ourselves
+                            auto it = nodes.find(gnode.name);
+                            if (it != nodes.end()) {
+                                if (it->second.publicKey != gnode.publicKey) {
+                                    continue; // Key mismatch TOFU
+                                }
+                            } else if (nodes.size() >= 1000) {
+                                continue;
+                            }
+                            nodes[gnode.name] = {
+                                gnode.name,
+                                gnode.ip,
+                                gnode.services,
+                                std::chrono::steady_clock::now(),
+                                NodeStatus::Online,
+                                gnode.publicKey
+                            };
+                            updated = true;
+                        }
+                    }
+                    if (updated) {
+                        updateOwnersDB();
+                    }
+                }
+            } else {
+                std::cerr << "[error] receiver: received invalid packet\n";
+            }
+        }
+    }
+
+    void runGossip() {
+        // Run every 30 seconds
+        std::default_random_engine generator(std::chrono::system_clock::now().time_since_epoch().count());
+        while (running) {
+            std::this_thread::sleep_for(std::chrono::seconds(30));
+            if (!running) break;
+
+            Node peer;
+            bool found = false;
+
+            {
+                std::shared_lock<std::shared_mutex> lock(nodesMutex);
+                std::vector<Node> candidates;
+                for (const auto& pair : nodes) {
+                    if (pair.second.name != cfg.name && pair.second.status == NodeStatus::Online) {
+                        candidates.push_back(pair.second);
+                    }
+                }
+                if (!candidates.empty()) {
+                    std::uniform_int_distribution<size_t> distribution(0, candidates.size() - 1);
+                    peer = candidates[distribution(generator)];
+                    found = true;
+                }
+            }
+
+            if (found) {
+                // Send GossipRequest unicast to peer
+                lnos::Packet p;
+                p.type = lnos::PacketType::GossipRequest;
+                p.publicKey = publicKey;
+
+                // Fill our registry into gossipNodes
+                {
+                    std::shared_lock<std::shared_mutex> lock(nodesMutex);
+                    int count = 0;
+                    for (const auto& pair : nodes) {
+                        if (pair.second.status == NodeStatus::Online) {
+                            lnos::GossipNode gn{
+                                pair.second.name,
+                                pair.second.ip,
+                                pair.second.services,
+                                pair.second.publicKey
+                            };
+                            p.gossipNodes.push_back(gn);
+                            if (++count >= 100) break;
+                        }
+                    }
+                }
+
+                if (lnos::signPacket(p, privateKey)) {
+                    // Encrypt as unicast
+                    if (lnos::encryptPacketPayload(p, privateKey, peer.publicKey, false)) {
+                        lnos::Blob msg = lnos::encode(p, true);
+
+                        // Is it IPv4 or IPv6?
+                        if (peer.ip.find(':') != std::string::npos) {
+                            // IPv6 unicast
+                            FdGuard s6(socket(AF_INET6, SOCK_DGRAM, 0));
+                            if (s6 >= 0) {
+                                sockaddr_in6 addr6{};
+                                addr6.sin6_family = AF_INET6;
+                                addr6.sin6_port = htons(cfg.port);
+                                if (inet_pton(AF_INET6, peer.ip.c_str(), &addr6.sin6_addr) == 1) {
+                                    sendto(s6, msg.data(), msg.size(), 0, reinterpret_cast<sockaddr*>(&addr6), sizeof(addr6));
+                                }
+                            }
+                        } else {
+                            // IPv4 unicast
+                            FdGuard s4(socket(AF_INET, SOCK_DGRAM, 0));
+                            if (s4 >= 0) {
+                                sockaddr_in addr4{};
+                                addr4.sin_family = AF_INET;
+                                addr4.sin_port = htons(cfg.port);
+                                if (inet_pton(AF_INET, peer.ip.c_str(), &addr4.sin_addr) == 1) {
+                                    sendto(s4, msg.data(), msg.size(), 0, reinterpret_cast<sockaddr*>(&addr4), sizeof(addr4));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    void runHttpServer() {
+        FdGuard server_sock(socket(AF_INET, SOCK_STREAM, 0));
+        if (server_sock < 0) {
+            std::cerr << "[error] HTTP server socket creation failed\n";
+            return;
+        }
+
+        int reuse = 1;
+        setsockopt(server_sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+        sockaddr_in server_addr{};
+        server_addr.sin_family = AF_INET;
+        server_addr.sin_addr.s_addr = INADDR_ANY;
+        server_addr.sin_port = htons(8080);
+
+        if (bind(server_sock, reinterpret_cast<sockaddr*>(&server_addr), sizeof(server_addr)) < 0) {
+            std::cerr << "[warning] HTTP server bind failed on port 8080. Running HTTP server is disabled.\n";
+            return;
+        }
+
+        if (listen(server_sock, 10) < 0) {
+            std::cerr << "[error] HTTP server listen failed\n";
+            return;
+        }
+
+        timeval tv{};
+        tv.tv_sec = 1;
+        tv.tv_usec = 0;
+        setsockopt(server_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+        while (running) {
+            int client = accept(server_sock, nullptr, nullptr);
+            if (client < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+                    continue;
+                }
+                break;
+            }
+
+            std::thread([this, client]() {
+                FdGuard client_sock(client);
+                char request_buf[2048];
+                ssize_t bytes_received = recv(client, request_buf, sizeof(request_buf) - 1, 0);
+                if (bytes_received <= 0) return;
+
+                request_buf[bytes_received] = '\0';
+                std::string req(request_buf);
+                std::string path;
+                if (req.rfind("GET ", 0) == 0) {
+                    size_t end_of_path = req.find(' ', 4);
+                    if (end_of_path != std::string::npos) {
+                        path = req.substr(4, end_of_path - 4);
+                    }
+                }
+
+                std::string response_body;
+                std::string content_type = "text/plain";
+
+                if (path == "/nodes") {
+                    content_type = "application/json";
+                    std::stringstream json;
+                    json << "[\n";
+                    {
+                        std::shared_lock<std::shared_mutex> lock(nodesMutex);
+                        bool first = true;
+                        for (const auto& pair : nodes) {
+                            if (!first) json << ",\n";
+                            first = false;
+                            json << "  {\n"
+                                 << "    \"name\": \"" << pair.second.name << "\",\n"
+                                 << "    \"ip\": \"" << pair.second.ip << "\",\n"
+                                 << "    \"status\": \"" << (pair.second.status == NodeStatus::Online ? "Online" : "Offline") << "\",\n"
+                                 << "    \"services\": [";
+                            bool s_first = true;
+                            for (const auto& s : pair.second.services) {
+                                if (!s_first) json << ", ";
+                                s_first = false;
+                                json << "{\"name\":\"" << s.name << "\", \"port\":" << s.port << "}";
+                            }
+                            json << "]\n"
+                                 << "  }";
+                        }
+                    }
+                    json << "\n]";
+                    response_body = json.str();
+                } else if (path == "/stats") {
+                    content_type = "application/json";
+                    std::stringstream json;
+                    json << "{\n"
+                         << "  \"queriesResolved\": " << queriesResolved.load() << ",\n"
+                         << "  \"queriesFailed\": " << queriesFailed.load() << ",\n"
+                         << "  \"packetsReceived\": " << packetsReceived.load() << ",\n"
+                         << "  \"packetsDropped\": " << packetsDropped.load() << ",\n"
+                         << "  \"packetsRejectedSig\": " << packetsRejectedSig.load() << "\n"
+                         << "}";
+                    response_body = json.str();
+                } else if (path == "/" || path.empty()) {
+                    content_type = "text/html; charset=utf-8";
+                    std::stringstream html;
+                    html << "<!DOCTYPE html>\n"
+                         << "<html>\n<head>\n"
+                         << "<title>LNOS Node Dashboard</title>\n"
+                         << "<style>\n"
+                         << "  body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f6f9; color: #333; margin: 0; padding: 0; }\n"
+                         << "  .header { background-color: #2c3e50; color: white; padding: 20px; text-align: center; }\n"
+                         << "  .container { max-width: 1200px; margin: 30px auto; padding: 0 20px; }\n"
+                         << "  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px; margin-bottom: 30px; }\n"
+                         << "  .card { background-color: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); text-align: center; }\n"
+                         << "  .card h3 { margin: 0 0 10px 0; color: #7f8c8d; font-size: 14px; text-transform: uppercase; }\n"
+                         << "  .card .value { font-size: 28px; font-weight: bold; color: #2c3e50; }\n"
+                         << "  table { width: 100%; border-collapse: collapse; background-color: white; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); overflow: hidden; }\n"
+                         << "  th, td { padding: 15px; text-align: left; border-bottom: 1px solid #eee; }\n"
+                         << "  th { background-color: #34495e; color: white; }\n"
+                         << "  tr:hover { background-color: #f9f9f9; }\n"
+                         << "  .status-badge { padding: 5px 10px; border-radius: 12px; font-size: 12px; font-weight: bold; }\n"
+                         << "  .status-online { background-color: #2ecc71; color: white; }\n"
+                         << "  .status-offline { background-color: #e74c3c; color: white; }\n"
+                         << "</style>\n"
+                         << "<script>\n"
+                         << "  async function refresh() {\n"
+                         << "    try {\n"
+                         << "      const statsRes = await fetch('/stats');\n"
+                         << "      const stats = await statsRes.json();\n"
+                         << "      document.getElementById('resolved').innerText = stats.queriesResolved;\n"
+                         << "      document.getElementById('failed').innerText = stats.queriesFailed;\n"
+                         << "      document.getElementById('received').innerText = stats.packetsReceived;\n"
+                         << "      document.getElementById('dropped').innerText = stats.packetsDropped;\n"
+                         << "      const nodesRes = await fetch('/nodes');\n"
+                         << "      const nodes = await nodesRes.json();\n"
+                         << "      let rows = '';\n"
+                         << "      nodes.forEach(node => {\n"
+                         << "        const svcs = node.services.map(s => `${s.name}:${s.port}`).join(', ') || 'None';\n"
+                         << "        const badge = node.status === 'Online' ? 'status-online' : 'status-offline';\n"
+                         << "        rows += `<tr><td>${node.name}</td><td>${node.ip}</td><td><span class=\"status-badge ${badge}\">${node.status}</span></td><td>${svcs}</td></tr>`;\n"
+                         << "      });\n"
+                         << "      document.getElementById('peer-rows').innerHTML = rows;\n"
+                         << "    } catch(e) { console.error(e); }\n"
+                         << "  }\n"
+                         << "  setInterval(refresh, 2000);\n"
+                         << "</script>\n"
+                         << "</head>\n"
+                         << "<body onload=\"refresh()\">\n"
+                         << "  <div class=\"header\">\n"
+                         << "    <h1>LNOS Local Network Overlay System</h1>\n"
+                         << "    <p>Node: " << cfg.name << "</p>\n"
+                         << "  </div>\n"
+                         << "  <div class=\"container\">\n"
+                         << "    <div class=\"grid\">\n"
+                         << "      <div class=\"card\"><h3>Queries Resolved</h3><div class=\"value\" id=\"resolved\">0</div></div>\n"
+                         << "      <div class=\"card\"><h3>Queries Failed</h3><div class=\"value\" id=\"failed\">0</div></div>\n"
+                         << "      <div class=\"card\"><h3>Packets Received</h3><div class=\"value\" id=\"received\">0</div></div>\n"
+                         << "      <div class=\"card\"><h3>Packets Dropped</h3><div class=\"value\" id=\"dropped\">0</div></div>\n"
+                         << "    </div>\n"
+                         << "    <h2>Connected Nodes</h2>\n"
+                         << "    <table>\n"
+                         << "      <thead><tr><th>Name</th><th>IP Address</th><th>Status</th><th>Services</th></tr></thead>\n"
+                         << "      <tbody id=\"peer-rows\"></tbody>\n"
+                         << "    </table>\n"
+                         << "  </div>\n"
+                         << "</body>\n</html>\n";
+                    response_body = html.str();
+                } else {
+                    response_body = "Not Found";
+                }
+
+                std::stringstream resp_stream;
+                resp_stream << "HTTP/1.1 200 OK\r\n"
+                            << "Content-Length: " << response_body.length() << "\r\n"
+                            << "Content-Type: " << content_type << "\r\n"
+                            << "Connection: close\r\n\r\n"
+                            << response_body;
+                std::string full_response = resp_stream.str();
+                send(client, full_response.data(), full_response.length(), 0);
+            }).detach();
+        }
+    }
+
+    void runPrinter() {
+        while (running) {
+            {
+                std::shared_lock<std::shared_mutex> lock(nodesMutex);
+                std::cout << "=== LNOS NODES ===" << std::endl;
                 for (const auto& n : nodes) {
                     auto seconds = std::chrono::duration_cast<std::chrono::seconds>
                     (std::chrono::steady_clock::now() - n.second.lastSeen).count();
@@ -790,77 +1041,53 @@ void printer() {
                     std::cout << n.second.name
                               << " - " << n.second.ip
                               << " Status: "
-                              << (n.second.status == NodeStatus::Online
-                                  ? "Online"
-                                  : "Offline");
+                              << (n.second.status == NodeStatus::Online ? "Online" : "Offline");
                     if (n.second.status == NodeStatus::Offline) {
                         std::cout << "(" << seconds << " seconds ago)";
                     }
                     std::cout << std::endl;
                     std::cout << "Services:\n";
-
-                    for (const auto& s : n.second.services)
-                    {
-                        std::cout
-                            << "  "
-                            << s.name
-                            << ":"
-                            << s.port
-                            << '\n';
+                    for (const auto& s : n.second.services) {
+                        std::cout << "  " << s.name << ":" << s.port << '\n';
                     }
                 }
-        } // mutex освобождён здесь
-
-
-        std::this_thread::sleep_for(std::chrono::seconds(10));
-    }
-}
-
-void updateOwnersDB() {
-    std::string path = lnos::getConfigDir() + "/owners.db";
-    std::string tmp = path + ".tmp";
-    std::set<std::string> owners;
-    for (const auto& n : nodes) {
-        auto dot = n.first.find_last_of('.');
-        if (dot != std::string::npos && dot + 1 < n.first.size()) {
-            owners.insert(n.first.substr(dot + 1));
+            }
+            std::this_thread::sleep_for(std::chrono::seconds(10));
         }
     }
-    // Atomic write: tmp → rename (crash-safe)
-    std::ofstream f(tmp);
-    if (!f.is_open()) return;
-    for (const auto& o : owners) {
-        f << o << "\n";
-    }
-    f.close();
-    std::error_code ec;
-    std::filesystem::permissions(tmp,
-        std::filesystem::perms::owner_read | std::filesystem::perms::owner_write |
-        std::filesystem::perms::group_read | std::filesystem::perms::others_read,
-        std::filesystem::perm_options::replace, ec);
-    std::filesystem::rename(tmp, path, ec);
-}
 
-void cleanup() {
-    while (running) {
-        {
-            std::unique_lock<std::shared_mutex> lock(nodesMutex);
+    void runCleanup() {
+        while (running) {
             bool changed = false;
-            for (auto it = nodes.begin(); it != nodes.end(); ) {
-                auto age = std::chrono::steady_clock::now() - it->second.lastSeen;
-                if (age > std::chrono::seconds(NODE_TTL_SECONDS * 4)) {
-                    it = nodes.erase(it);
-                    changed = true;
-                } else if (age > std::chrono::seconds(NODE_TTL_SECONDS)) {
-                    it->second.status = NodeStatus::Offline;
-                    ++it;
-                } else {
-                    ++it;
+            {
+                std::unique_lock<std::shared_mutex> lock(nodesMutex);
+                for (auto it = nodes.begin(); it != nodes.end(); ) {
+                    auto age = std::chrono::steady_clock::now() - it->second.lastSeen;
+                    if (age > std::chrono::seconds(NODE_TTL_SECONDS * 4)) {
+                        it = nodes.erase(it);
+                        changed = true;
+                    } else if (age > std::chrono::seconds(NODE_TTL_SECONDS)) {
+                        it->second.status = NodeStatus::Offline;
+                        ++it;
+                    } else {
+                        ++it;
+                    }
                 }
             }
-            if (changed) updateOwnersDB();
+            if (changed) {
+                updateOwnersDB();
+            }
+            std::this_thread::sleep_for(std::chrono::seconds(10));
         }
-        std::this_thread::sleep_for(std::chrono::seconds(10));
+    }
+};
+
+Daemon* g_daemon = nullptr;
+
+void handleSigint(int) {
+    std::cout << "CTRL+C received\n";
+    if (g_daemon) {
+        g_daemon->running = false;
     }
 }
 
@@ -868,91 +1095,97 @@ int main() {
     std::signal(SIGINT, handleSigint);
     std::signal(SIGTERM, handleSigint);
 
-    if (sodium_init() < 0) {
-        std::cerr << "[fatal] Failed to initialize libsodium\n";
-        return 1;
-    }
+    try {
+        Daemon daemon;
+        g_daemon = &daemon;
 
-    lnos::createConfig();
+        lnos::createConfig();
+        daemon.cfg = lnos::loadConfig();
 
-    cfg = lnos::loadConfig();
-    std::cout << "My name: " << cfg.name << "\n";
-    std::cout << "Multicast group: " << cfg.mcastGroup << " (IPv4), " << cfg.mcastGroupV6 << " (IPv6)\n";
-    std::cout << "Port: " << cfg.port << "\n";
-    std::cout << "---\n";
-    std::cout << "Tip: all nodes in the network must use the same multicast group and port.\n";
-    std::cout << "     Change them only if they conflict with existing services.\n";
-    std::cout << "     'lnosctl set mcast_group <ip>'  'lnosctl set port <num>'\n";
-    std::cout << "     Name format: device.type.owner (owner is auto-detected for NSS)\n";
-    std::cout << "Files are in: " << lnos::getConfigDir() << "\n";
-    std::cout << "---\n";
+        std::cout << "My name: " << daemon.cfg.name << "\n";
+        std::cout << "Multicast group: " << daemon.cfg.mcastGroup << " (IPv4), " << daemon.cfg.mcastGroupV6 << " (IPv6)\n";
+        std::cout << "Port: " << daemon.cfg.port << "\n";
+        std::cout << "---\n";
+        std::cout << "Tip: all nodes in the network must use the same multicast group and port.\n";
+        std::cout << "Files are in: " << lnos::getConfigDir() << "\n";
+        std::cout << "---\n";
 
-    interfaceInfo = detectInterface();
-    std::cout << "Detected interface: " << interfaceInfo.name << " (index: " << interfaceInfo.index << ")\n";
-    if (interfaceInfo.has_ipv4) {
-        std::cout << "  IPv4: " << interfaceInfo.ipv4 << "\n";
-    }
-    if (interfaceInfo.has_ipv6) {
-        std::cout << "  IPv6: " << interfaceInfo.ipv6 << "\n";
-    }
+        daemon.loadKeys();
 
-    if (!interfaceInfo.has_ipv4 && !interfaceInfo.has_ipv6) {
-        stopWithError("No active network interfaces with IPv4 or IPv6 found.");
-        return 1;
-    }
+        daemon.interfaceInfo = daemon.detectInterface();
+        std::cout << "Detected interface: " << daemon.interfaceInfo.name << " (index: " << daemon.interfaceInfo.index << ")\n";
+        if (daemon.interfaceInfo.has_ipv4) {
+            std::cout << "  IPv4: " << daemon.interfaceInfo.ipv4 << "\n";
+        }
+        if (daemon.interfaceInfo.has_ipv6) {
+            std::cout << "  IPv6: " << daemon.interfaceInfo.ipv6 << "\n";
+        }
 
-    // Seed owners.db with our own owner so NSS works even before peer discovery
-    {
-        std::string path = lnos::getConfigDir() + "/owners.db";
-        if (!std::filesystem::exists(path)) {
-            auto dot = cfg.name.find_last_of('.');
-            if (dot != std::string::npos && dot + 1 < cfg.name.size()) {
-                std::string tmp = path + ".tmp";
-                std::ofstream f(tmp);
-                if (f.is_open()) {
-                    f << cfg.name.substr(dot + 1) << "\n";
-                    f.close();
-                    std::error_code ec;
-                    std::filesystem::permissions(tmp,
-                        std::filesystem::perms::owner_read | std::filesystem::perms::owner_write |
-                        std::filesystem::perms::group_read | std::filesystem::perms::others_read,
-                        std::filesystem::perm_options::replace, ec);
-                    std::filesystem::rename(tmp, path, ec);
+        if (!daemon.interfaceInfo.has_ipv4 && !daemon.interfaceInfo.has_ipv6) {
+            daemon.stopWithError("No active network interfaces with IPv4 or IPv6 found.");
+            return 1;
+        }
+
+        // Seed owners.db with our own owner
+        {
+            std::string path = lnos::getConfigDir() + "/owners.db";
+            if (!std::filesystem::exists(path)) {
+                auto dot = daemon.cfg.name.find_last_of('.');
+                if (dot != std::string::npos && dot + 1 < daemon.cfg.name.size()) {
+                    std::string tmp = path + ".tmp";
+                    std::ofstream f(tmp);
+                    if (f.is_open()) {
+                        f << daemon.cfg.name.substr(dot + 1) << "\n";
+                        f.close();
+                        std::error_code ec;
+                        std::filesystem::permissions(tmp,
+                            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write |
+                            std::filesystem::perms::group_read | std::filesystem::perms::others_read,
+                            std::filesystem::perm_options::replace, ec);
+                        std::filesystem::rename(tmp, path, ec);
+                    }
                 }
             }
         }
-    }
 
-    // Self-register so node can resolve itself even without multicast loopback
-    {
-        std::unique_lock<std::shared_mutex> lock(nodesMutex);
-        nodes[cfg.name] = {
-            cfg.name,
-            interfaceInfo.has_ipv4 ? interfaceInfo.ipv4 : interfaceInfo.ipv6,
-            cfg.services,
-            std::chrono::steady_clock::now(),
-            NodeStatus::Online,
-            lnos::loadPublicKey()
-        };
-    }
-
-    std::vector<std::thread> threads;
-    if (interfaceInfo.has_ipv4) {
-        threads.emplace_back(sender_ipv4, interfaceInfo.ipv4);
-        threads.emplace_back(receiver_ipv4, interfaceInfo.ipv4);
-    }
-    if (interfaceInfo.has_ipv6) {
-        threads.emplace_back(sender_ipv6, interfaceInfo.index);
-        threads.emplace_back(receiver_ipv6, interfaceInfo.index);
-    }
-    threads.emplace_back(query_server);
-    threads.emplace_back(printer);
-    threads.emplace_back(cleanup);
-
-    for (auto& t : threads) {
-        if (t.joinable()) {
-            t.join();
+        // Self-register
+        {
+            std::unique_lock<std::shared_mutex> lock(daemon.nodesMutex);
+            nodes[daemon.cfg.name] = {
+                daemon.cfg.name,
+                daemon.interfaceInfo.has_ipv4 ? daemon.interfaceInfo.ipv4 : daemon.interfaceInfo.ipv6,
+                daemon.cfg.services,
+                std::chrono::steady_clock::now(),
+                NodeStatus::Online,
+                daemon.publicKey
+            };
         }
+
+        std::vector<std::thread> threads;
+        if (daemon.interfaceInfo.has_ipv4) {
+            threads.emplace_back(&Daemon::runSender<IPv4Traits>, &daemon, daemon.interfaceInfo.ipv4, 0);
+            threads.emplace_back(&Daemon::runReceiver<IPv4Traits>, &daemon, daemon.interfaceInfo.ipv4, 0);
+        }
+        if (daemon.interfaceInfo.has_ipv6) {
+            threads.emplace_back(&Daemon::runSender<IPv6Traits>, &daemon, "", daemon.interfaceInfo.index);
+            threads.emplace_back(&Daemon::runReceiver<IPv6Traits>, &daemon, "", daemon.interfaceInfo.index);
+        }
+        threads.emplace_back(&Daemon::runQueryServer, &daemon);
+        threads.emplace_back(&Daemon::runGossip, &daemon);
+        threads.emplace_back(&Daemon::runHttpServer, &daemon);
+        threads.emplace_back(&Daemon::runPrinter, &daemon);
+        threads.emplace_back(&Daemon::runCleanup, &daemon);
+
+        for (auto& t : threads) {
+            if (t.joinable()) {
+                t.join();
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "[fatal] Daemon exception: " << e.what() << "\n";
+        return 1;
     }
+
     std::cout << "LNOS is stopped." << std::endl;
+    return 0;
 }

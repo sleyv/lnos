@@ -31,7 +31,9 @@ namespace lnos {
     enum class PacketType {
         Announce = 0,
         Query = 1,
-        Response = 2
+        Response = 2,
+        GossipRequest = 3,
+        GossipResponse = 4
     };
 
     struct Service {
@@ -51,12 +53,27 @@ namespace lnos {
         {}
     };
 
+    struct GossipNode {
+        std::string name;
+        std::string ip;
+        std::vector<Service> services;
+        std::array<uint8_t, PUBLIC_KEY_SIZE> publicKey;
+    };
+
     struct Packet {
         std::string version;
         PacketType type;
         PacketAnnounce announce;
         std::array<std::uint8_t, PUBLIC_KEY_SIZE> publicKey;
         std::array<std::uint8_t, SIGNATURE_SIZE> signature;
+
+        // Gossip nodes (only serialized if type is GossipRequest or GossipResponse and isEncrypted is 0)
+        std::vector<GossipNode> gossipNodes;
+
+        // Encryption fields
+        uint8_t isEncrypted = 0;
+        std::array<uint8_t, 24> nonce{};
+        std::vector<uint8_t> encryptedPayload;
 
         Packet()
             : version(std::to_string(PROTOCOL_VERSION)),
@@ -161,23 +178,49 @@ namespace lnos {
 
         blobPush(blob, p.version);
         blobPush(blob, (uint16_t) p.type);
+        blob.push_back(p.isEncrypted);
 
-        switch (p.type) {
-        case PacketType::Announce:
-        case PacketType::Query:
-        case PacketType::Response: {
-          const auto& announce = p.announce;
-          blobPush(blob, announce.name);
+        if (p.isEncrypted) {
+            blobPush(blob, p.nonce);
+            uint64_t payLen = p.encryptedPayload.size();
+            blobPush(blob, payLen);
+            for (uint8_t b : p.encryptedPayload) {
+                blob.push_back(b);
+            }
+        } else {
+            switch (p.type) {
+            case PacketType::Announce:
+            case PacketType::Query:
+            case PacketType::Response: {
+              const auto& announce = p.announce;
+              blobPush(blob, announce.name);
 
-          uint64_t len = announce.services.size();
-          blobPush(blob, len);
+              uint64_t len = announce.services.size();
+              blobPush(blob, len);
 
-          for (const auto& s : announce.services)
-          {
-            blobPush(blob, s.name);
-            blobPush(blob, s.port);
-          }
-        } break;
+              for (const auto& s : announce.services)
+              {
+                blobPush(blob, s.name);
+                blobPush(blob, s.port);
+              }
+            } break;
+            case PacketType::GossipRequest:
+            case PacketType::GossipResponse: {
+              uint64_t numGossip = p.gossipNodes.size();
+              blobPush(blob, numGossip);
+              for (const auto& node : p.gossipNodes) {
+                  blobPush(blob, node.name);
+                  blobPush(blob, node.ip);
+                  uint64_t svc_size = node.services.size();
+                  blobPush(blob, svc_size);
+                  for (const auto& s : node.services) {
+                      blobPush(blob, s.name);
+                      blobPush(blob, s.port);
+                  }
+                  blobPush(blob, node.publicKey);
+              }
+            } break;
+            }
         }
 
         blobPush(blob, p.publicKey);
@@ -199,31 +242,76 @@ namespace lnos {
         encodedPacketConsume(packet, type);
         result.type = (PacketType) type;
 
-        switch (result.type) {
-        case PacketType::Announce:
-        case PacketType::Query:
-        case PacketType::Response: {
-          auto& announce = result.announce;
-          encodedPacketConsume(packet, announce.name);
+        if (packet.len < 1)
+            return false;
+        result.isEncrypted = *packet.data;
+        packet.data += 1;
+        packet.len -= 1;
 
-          uint64_t len = 0;
-          encodedPacketConsume(packet, len);
-          // Limit maximum number of services to prevent OOM reserve DoS (H-3 protection)
-          if (len > 256)
+        if (result.isEncrypted) {
+            encodedPacketConsume(packet, result.nonce);
+            uint64_t payLen = 0;
+            encodedPacketConsume(packet, payLen);
+            if (packet.len < payLen)
+                return false;
+            result.encryptedPayload.assign(packet.data, packet.data + payLen);
+            packet.data += payLen;
+            packet.len -= payLen;
+        } else {
+            switch (result.type) {
+            case PacketType::Announce:
+            case PacketType::Query:
+            case PacketType::Response: {
+              auto& announce = result.announce;
+              encodedPacketConsume(packet, announce.name);
+
+              uint64_t len = 0;
+              encodedPacketConsume(packet, len);
+              // Limit maximum number of services to prevent OOM reserve DoS (H-3 protection)
+              if (len > 256)
+                  return false;
+              announce.services.clear();
+              announce.services.reserve(len);
+
+              for (uint64_t i = 0; i < len; ++i)
+              {
+                Service service;
+                encodedPacketConsume(packet, service.name);
+                encodedPacketConsume(packet, service.port);
+                announce.services.push_back(service);
+              }
+            } break;
+            case PacketType::GossipRequest:
+            case PacketType::GossipResponse: {
+              uint64_t numGossip = 0;
+              encodedPacketConsume(packet, numGossip);
+              if (numGossip > 1000) // Prevent memory exhaustion
+                  return false;
+              result.gossipNodes.clear();
+              result.gossipNodes.reserve(numGossip);
+              for (uint64_t i = 0; i < numGossip; ++i) {
+                  GossipNode node;
+                  encodedPacketConsume(packet, node.name);
+                  encodedPacketConsume(packet, node.ip);
+                  uint64_t svc_size = 0;
+                  encodedPacketConsume(packet, svc_size);
+                  if (svc_size > 256)
+                      return false;
+                  node.services.clear();
+                  node.services.reserve(svc_size);
+                  for (uint64_t j = 0; j < svc_size; ++j) {
+                      Service s;
+                      encodedPacketConsume(packet, s.name);
+                      encodedPacketConsume(packet, s.port);
+                      node.services.push_back(s);
+                  }
+                  encodedPacketConsume(packet, node.publicKey);
+                  result.gossipNodes.push_back(node);
+              }
+            } break;
+            default:
               return false;
-          announce.services.clear();
-          announce.services.reserve(len);
-
-          for (uint64_t i = 0; i < len; ++i)
-          {
-            Service service;
-            encodedPacketConsume(packet, service.name);
-            encodedPacketConsume(packet, service.port);
-            announce.services.push_back(service);
-          }
-        } break;
-        default:
-          return false;
+            }
         }
 
         encodedPacketConsume(packet, result.publicKey);
