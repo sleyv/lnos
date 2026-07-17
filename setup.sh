@@ -4,6 +4,9 @@ set -e
 LNOS_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="${LNOS_DIR}/build"
 
+# Try to make stdin interactive (curl | bash compat)
+(exec < /dev/tty) 2>/dev/null && exec < /dev/tty || true
+
 # ----- colors -----
 BOLD='\e[1m'
 DIM='\e[2m'
@@ -36,6 +39,13 @@ box()   { local lines=()
 INTERACTIVE=false
 [ -t 0 ] && INTERACTIVE=true
 
+prompt() { local v="$1" msg="$2" def="$3"
+    if $INTERACTIVE; then
+        read -r -p "$msg" "$v" 2>/dev/null || true
+    fi
+    [ -z "$(eval echo \$$v)" ] && eval "$v=\$def"
+}
+
 # ----- banner -----
 echo -e ""
 echo -e " ${MAGENTA} __    _   ______  _____${NC}"
@@ -53,7 +63,7 @@ if [ "$(id -u)" -eq 0 ]; then
         if $INTERACTIVE; then
             echo -e " ${YELLOW}⚠${NC} Running as ${BOLD}root${NC} (not via sudo)."
             echo -e "   Configs will be owned by root."
-            read -r -p "  Continue as root? [y/N]: " ans
+            prompt ans "  Continue as root? [y/N]: " "n"
             case "$ans" in [yY]|[yY][eE][sS]) ;; *) echo "  Exiting."; exit 1 ;; esac
         else
             echo -e " ${YELLOW}⚠${NC} Running as root (non-interactive) — continuing"
@@ -186,8 +196,7 @@ if pgrep -x lnosd >/dev/null 2>&1; then
         echo -e "    ${CYAN}1${NC}) Keep running — collision check via it, apply name on restart"
         echo -e "    ${CYAN}2${NC}) Restart daemon after setup — apply new config now"
         echo -e "    ${CYAN}3${NC}) Stop daemon — setup manages it from scratch"
-        read -r -p "  Choice [1]: " DAEMON_CHOICE
-        DAEMON_CHOICE="${DAEMON_CHOICE:-1}"
+        prompt DAEMON_CHOICE "  Choice [1]: " "1"
         case "$DAEMON_CHOICE" in
             2) DAEMON_RESTART_AFTER=true; info "Will restart lnosd after setup" ;;
             3) info "Stopping lnosd..."
@@ -252,21 +261,26 @@ NEED_COLLISION_CHECK=true
 $DAEMON_ALREADY_RUNNING && NEED_COLLISION_CHECK=false
 
 RANDOM_PREVIEW="$(pick_random_name)"
-echo -e ""
-echo -e "  ${BOLD}Choose node name format:${NC}"
-echo -e "    ${CYAN}1${NC}) Hostname-based — ${GREEN}${HOSTNAME_BASED}${NC}"
-echo -e "    ${CYAN}2${NC}) Random        — ${GREEN}${RANDOM_PREVIEW}${NC}"
-echo -e "    ${CYAN}3${NC}) Manual input"
-read -r -p "  Choice [1]: " NAME_CHOICE
-NAME_CHOICE="${NAME_CHOICE:-1}"
+
+if $INTERACTIVE; then
+    echo -e ""
+    echo -e "  ${BOLD}Choose node name format:${NC}"
+    echo -e "    ${CYAN}1${NC}) Hostname-based — ${GREEN}${HOSTNAME_BASED}${NC}"
+    echo -e "    ${CYAN}2${NC}) Random        — ${GREEN}${RANDOM_PREVIEW}${NC}"
+    echo -e "    ${CYAN}3${NC}) Manual input"
+    prompt NAME_CHOICE "  Choice [1]: " "1"
+else
+    NAME_CHOICE="1"
+    info "Using hostname-based name (non-interactive)"
+fi
 
 NODE_NAME=""
 while [ -z "$NODE_NAME" ]; do
     case "$NAME_CHOICE" in
         1) NODE_NAME="$HOSTNAME_BASED" ;;
         2) NODE_NAME="${RANDOM_FALLBACK:-$(pick_random_name)}" ;;
-        3) read -r -p "  Enter name (device.type.owner): " NODE_NAME ;;
-        *) read -r -p "  Invalid. Enter name manually: " NODE_NAME ;;
+        3) prompt NODE_NAME "  Enter name (device.type.owner): " ""; [ -z "$NODE_NAME" ] && NODE_NAME="$HOSTNAME_BASED" ;;
+        *) NODE_NAME="$HOSTNAME_BASED" ;;
     esac
 
     if [ -n "$NODE_NAME" ]; then
@@ -279,8 +293,7 @@ while [ -z "$NODE_NAME" ]; do
                     echo -e "    ${CYAN}1${NC}) Try hostname-based"
                     echo -e "    ${CYAN}2${NC}) Try another random"
                     echo -e "    ${CYAN}3${NC}) Manual input"
-                    read -r -p "    Choice [2]: " NAME_CHOICE
-                    NAME_CHOICE="${NAME_CHOICE:-2}"
+                    prompt NAME_CHOICE "    Choice [2]: " "2"
                     NODE_NAME=""
                     RANDOM_FALLBACK="$(pick_random_name)"
                 else
@@ -299,8 +312,7 @@ while [ -z "$NODE_NAME" ]; do
                     echo -e "    ${CYAN}1${NC}) Try hostname-based"
                     echo -e "    ${CYAN}2${NC}) Try another random"
                     echo -e "    ${CYAN}3${NC}) Manual input"
-                    read -r -p "    Choice [2]: " NAME_CHOICE
-                    NAME_CHOICE="${NAME_CHOICE:-2}"
+                    prompt NAME_CHOICE "    Choice [2]: " "2"
                     NODE_NAME=""
                     RANDOM_FALLBACK="$(pick_random_name)"
                 else
@@ -419,27 +431,30 @@ done
 echo -e ""
 header "Setup complete"
 
+W=59
+pline() { local t; t=$(echo -e "$*" | sed 's/\x1b\[[0-9;]*m//g'); local pad=$((W - ${#t})); [ "$pad" -lt 0 ] && pad=0; echo -e "${DIM}│${NC} $(echo -e "$*")$(printf '%*s' "$pad" '') ${DIM}│${NC}"; }
+
 echo -e "${DIM}┌─────────────────────────────────────────────────────────────┐${NC}"
-echo -e "${DIM}│${NC}  ${GREEN}Your node${NC}                                                  ${DIM}│${NC}"
-echo -e "${DIM}│${NC}    Name:  ${BOLD}${NODE_NAME}${NC}                                          ${DIM}│${NC}"
-echo -e "${DIM}│${NC}    IP:    ${MY_IP}                                               ${DIM}│${NC}"
-echo -e "${DIM}│${NC}    Port:  4545  Group: 239.255.42.99                              ${DIM}│${NC}"
-echo -e "${DIM}│${NC}                                                             ${DIM}│${NC}"
-echo -e "${DIM}│${NC}  ${GREEN}Dashboard${NC}                                                ${DIM}│${NC}"
-echo -e "${DIM}│${NC}    ${UL}http://localhost:9999${NC}    — web UI with peer list          ${DIM}│${NC}"
-echo -e "${DIM}│${NC}    ${UL}http://${MY_IP}:9999${NC}     — from other machines on LAN   ${DIM}│${NC}"
-echo -e "${DIM}│${NC}                                                             ${DIM}│${NC}"
-echo -e "${DIM}│${NC}  ${GREEN}Commands${NC}                                                 ${DIM}│${NC}"
-echo -e "${DIM}│${NC}    systemctl ${BOLD}start${NC} lnosd           start the daemon           ${DIM}│${NC}"
-echo -e "${DIM}│${NC}    systemctl ${BOLD}enable --now${NC} lnosd    enable on boot + start     ${DIM}│${NC}"
-echo -e "${DIM}│${NC}    lnosctl ${BOLD}stats${NC}                   show peer count & metrics   ${DIM}│${NC}"
-echo -e "${DIM}│${NC}    getent hosts ${BOLD}${NODE_NAME}${NC}         resolve your own name    ${DIM}│${NC}"
-echo -e "${DIM}│${NC}    journalctl ${BOLD}-u lnosd -f${NC}          follow daemon logs         ${DIM}│${NC}"
-echo -e "${DIM}│${NC}                                                             ${DIM}│${NC}"
-echo -e "${DIM}│${NC}  ${GREEN}On other machines${NC}                                          ${DIM}│${NC}"
-echo -e "${DIM}│${NC}    Install LNOS the same way — all nodes discover each other   ${DIM}│${NC}"
-echo -e "${DIM}│${NC}    automatically on the same multicast group                   ${DIM}│${NC}"
-echo -e "${DIM}│${NC}    (239.255.42.99:4545).                                        ${DIM}│${NC}"
+pline " ${GREEN}Your node${NC}"
+pline "   Name:  ${BOLD}${NODE_NAME}${NC}"
+pline "   IP:    ${MY_IP}"
+pline "   Port:  4545    Group: 239.255.42.99"
+pline ""
+pline " ${GREEN}Dashboard${NC}"
+pline "   ${UL}http://localhost:9999${NC}   — web UI with peer list"
+pline "   ${UL}http://${MY_IP}:9999${NC}    — from other machines on LAN"
+pline ""
+pline " ${GREEN}Commands${NC}"
+pline "   systemctl ${BOLD}start${NC} lnosd           start the daemon"
+pline "   systemctl ${BOLD}enable --now${NC} lnosd    enable on boot + start"
+pline "   lnosctl ${BOLD}stats${NC}                   show peer count & metrics"
+pline "   getent hosts ${BOLD}${NODE_NAME}${NC}        resolve your own name"
+pline "   journalctl ${BOLD}-u lnosd -f${NC}          follow daemon logs"
+pline ""
+pline " ${GREEN}On other machines${NC}"
+pline "   Install LNOS the same way — all nodes discover"
+pline "   each other automatically on the same multicast"
+pline "   group (239.255.42.99:4545)."
 echo -e "${DIM}└─────────────────────────────────────────────────────────────┘${NC}"
 
 echo -e ""
