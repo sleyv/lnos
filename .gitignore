@@ -1,5 +1,6 @@
 # Build folders
 build/
+build_debug/
 cmake-build-*/
 out/
 
@@ -15,6 +16,9 @@ Makefile
 *.app
 *.o
 *.obj
+*.so
+*.so.*
+*.a
 
 # Logs / runtime junk
 *.log

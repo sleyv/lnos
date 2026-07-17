@@ -1,128 +1,149 @@
-# LNOS — Local Network Overlay System
+<div align="center">
+  <h1>LNOS</h1>
+  <p><strong>Local Network Overlay System — distributed discovery and name resolution for local networks</strong></p>
 
-Experimental overlay networking system for local networks.
+  [🇺🇸 In English](README.md)
+  [🇷🇺 На русском](README_ru.md)
 
-LNOS is a lightweight distributed discovery and communication layer built on top of standard IP networking. Instead of interacting with devices through IP addresses, nodes are identified using human-readable hierarchical names.
+  <img src="https://img.shields.io/badge/C%2B%2B-20%2F23%2F26-blue?style=flat&logo=c%2B%2B" alt="C++" />
+  <img src="https://img.shields.io/badge/Linux-x86__64%20%7C%20ARM-purple?style=flat&logo=linux" alt="Linux" />
+  <img src="https://img.shields.io/badge/Dual--Stack-IPv4%20%7C%20IPv6-orange?style=flat" alt="Dual Stack" />
+  <img src="https://img.shields.io/badge/License-MIT-green?style=flat" alt="License" />
+</div>
 
-Example:
+---
 
-```text id="kq7m2d"
-pc.main.gervaty
-laptop.dev.myxa
-pi.router.home
+### 📖 Overview
+
+**LNOS** replaces IP addresses with human-readable names like `laptop.dev.myxa`. Nodes discover each other via encrypted multicast, exchange presence via gossip, and resolve names through a system-wide NSS module — no DNS, no central server.
+
+- 🔐 **Encrypted Payload**: Symmetric (multicast) via `crypto_secretbox`, asymmetric (unicast) via `crypto_box`.
+- 🤝 **Gossip Protocol**: Periodic peer exchange keeps the registry converged across all nodes.
+- 🌐 **Dual-Stack**: IPv4 and IPv6 running independently with automatic interface detection.
+- 📊 **Built-in HTTP Dashboard**: Real-time UI with node list, metrics, JSON API.
+- ⚡ **NSS Integration**: `getent hosts laptop.dev.myxa` works in any program — ping, ssh, curl.
+- 🔇 **Per-Source Rate Limiting**: 50 pkt/sec per IP — one flaky node can't DoS the network.
+- 🧠 **Name Takeover Protection**: Ed25519 public key pinned to name — key mismatch = packet rejected.
+
+---
+
+### 🛠️ Prerequisites
+
+- `cmake` (3.16+)
+- `g++` (13+), supports C++20
+- `libsodium` (development headers)
+- Linux with multicast-capable network interface
+- (Optional) `ufw` / `firewalld` / `nftables` / `iptables` for firewall rules
+
+---
+
+### 🚀 Getting Started
+
+#### 1. One-Click Install
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/sleyv/lnos/master/setup.sh)"
 ```
 
-LNOS is not intended to replace IP, DNS, or the Internet.
-It exists as a local overlay system for experimentation and learning.
+Downloads, builds, generates keys, and installs the daemon + NSS module — all in one command.
 
----
+#### 2. Or Clone & Build Manually
 
-# Features
+```bash
+git clone https://github.com/sleyv/lnos.git ~/lnos
+cd ~/lnos
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
+```
 
-## Current
+Then run `./setup.sh` to install.
 
-* UDP multicast node discovery
-* Automatic node registry
-* TTL-based node cleanup
-* Multi-threaded node agent
-* Human-readable node naming
+```bash
+./setup.sh
+```
 
-## Planned
+The script will install dependencies, configure your node name, generate Ed25519 keys, install the NSS module, and create a systemd service.
 
-* Name resolution (resolve API)
-* Direct node-to-node messaging
-* Service discovery layer
-* Message routing between nodes
-* Distributed registry synchronization
-* Network topology visualization
+#### 3. Start the Daemon
 
----
+```bash
+sudo systemctl enable --now lnosd
+# or directly:
+sudo lnosd
+```
 
-# Architecture Overview
+#### 4. Verify Resolution
 
-Each node runs a lightweight agent responsible for:
-
-* announcing itself in the network
-* discovering other nodes
-* maintaining local registry state
-* tracking node availability
-
-Nodes communicate over multicast UDP and maintain a shared view of the network.
-
-```text id="w8xk1p"
-Node A  <---- multicast discovery ---->  Node B
-   \                                      /
-    \------------ LAN network ----------/
+```bash
+getent hosts $(hostname).pc.$(whoami)
+# → 192.168.1.69  thinkpad.laptop.ruslan
 ```
 
 ---
 
-# Concepts
+### ⚙️ Usage
 
-## Node Identity
+The application consists of a **background daemon** (`lnosd`) and a **CLI control tool** (`lnosctl`).
 
-Each node is identified by a human-readable name:
+#### 1. Dashboard
 
-```text id="z2k9sa"
-device.type.owner
+Open http://localhost:9999 in your browser, or use curl:
+
+```bash
+curl http://localhost:9999/nodes    # JSON node list
+curl http://localhost:9999/stats    # JSON daemon metrics
 ```
 
-Example:
+#### 2. Control the Daemon
 
-```text id="q1m8fd"
-pc.main.ruslan
-laptop.dev.ruslan
+```bash
+lnosctl stats                       # Show metrics (queries, packets, drops)
+lnosctl set name thinkpad.laptop.me # Change node name
+lnosctl set http_port 8080          # Change HTTP dashboard port
+lnosctl set mcast_group 239.255.0.1 # Change multicast group
+lnosctl set port 5454               # Change UDP port
 ```
 
-## Node Lifecycle
+#### 3. Resolve Names
 
-Nodes periodically announce their presence.
-If a node stops sending updates, it is considered offline and removed after a TTL period.
+Once the NSS module is installed and the daemon is running, any program can resolve LNOS names:
+
+```bash
+ping laptop.dev.myxa
+ssh pc.main.gervaty
+curl http://pi.router.home:9999
+```
 
 ---
 
-# Roadmap
+### 📁 Project Architecture
 
-## Node Metadata
-
-* ONLINE/OFFLINE states
-* last seen timestamps
-* service descriptors
-* node UUIDs
-* improved packet format
-
-## Name Resolution
-
-* resolve(name) API
-* query/response protocol
-* local caching of resolved nodes
-
-## Messaging Layer
-
-* direct UDP communication
-* TCP messaging support
-* message routing
-* basic authentication/token support
-
-## Visualization
-
-* network topology representation
-* live updates
-* optional web UI
-
-## Distributed Registry
-
-* peer-to-peer synchronization
-* gossip-based updates
-* conflict resolution strategies
+```text
+lnos/
+  ├── lnosd/                  # Daemon source
+  │   ├── src/main.cpp        # Daemon class, sender/receiver/HTTP/gossip
+  │   ├── src/registry.cpp    # Nodes map
+  │   └── include/registry.h  # Node struct
+  ├── liblnos/                # Shared library
+  │   ├── include/lnos/
+  │   │   ├── protocol.h      # Packet encode/decode, blob ops
+  │   │   ├── crypto.h        # sign, verify, encrypt, decrypt
+  │   │   └── config.h        # Config loading
+  │   ├── src/
+  │   │   ├── crypto.cpp      # Ed25519 + crypto_box/secretbox
+  │   │   ├── config.cpp      # File I/O, config parsing
+  │   │   └── nss_lnos.cpp    # NSS module (glibc plugin)
+  ├── lnosctl/                # CLI tool
+  │   └── src/main.cpp        # Key generation, config, stats
+  ├── tests/
+  │   └── test_lnos.cpp       # 49 GTest unit tests
+  ├── setup.sh                # Build + install/uninstall script
+  ├── LICENSE                 # MIT License
+  └── README.md               # This file
+```
 
 ---
 
-# Status
+### 📄 License
 
-LNOS is an early experimental system for exploring:
-
-* distributed networking concepts
-* service discovery mechanisms
-* overlay network design
-* systems programming in C++
+Distributed under the **MIT License**.
