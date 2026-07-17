@@ -115,15 +115,28 @@ check_name_free() {
 
 # Start daemon temporarily for name collision check
 start_daemon_if_needed() {
-    if ! pgrep -x lnosd >/dev/null 2>&1; then
-        "$BUILD_DIR/lnosd" &
-        DAEMON_PID=$!
-        sleep 2
+    if pgrep -x lnosd >/dev/null 2>&1; then
+        warn "Another lnosd is already running (PID $(pgrep -x lnosd))"
+        echo "  Setup can use it for name collision check, but name changes"
+        echo "  will only apply after restart."
+        read -r -p "  Continue with running daemon? [Y/n]: " answer
+        case "$answer" in
+            [nN]*) echo "  Exiting. Please stop lnosd first: systemctl stop lnosd" ; exit 1 ;;
+        esac
+        return 0
     fi
+    info "Starting daemon (temp) to check name availability..."
+    "$BUILD_DIR/lnosd" > /dev/null 2>&1 &
+    DAEMON_PID=$!
+    for i in 1 2 3 4 5; do
+        [ -S /etc/lnos/lnosd.sock ] && break
+        sleep 1
+    done
 }
 
 stop_daemon_if_started() {
     if [ -n "$DAEMON_PID" ]; then
+        info "Stopping temp daemon..."
         kill "$DAEMON_PID" 2>/dev/null
         wait "$DAEMON_PID" 2>/dev/null
         unset DAEMON_PID
@@ -166,6 +179,9 @@ stop_daemon_if_started
 
 "$BUILD_DIR/lnosctl" set name "$NODE_NAME"
 info "Node name → $NODE_NAME"
+if pgrep -x lnosd >/dev/null 2>&1; then
+    info "Restart the running daemon to apply: systemctl restart lnosd"
+fi
 
 # ----- systemd service -----
 if command -v systemctl >/dev/null 2>&1; then
