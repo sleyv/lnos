@@ -683,9 +683,12 @@ public:
                             std::cerr << "[warning] receiver: registry full (1000 limit), ignoring node '" << announce.name << "'\n";
                             continue;
                         }
+                        // Prefer IPv4 over IPv6: keep existing IPv4 if we have one
+                        bool isNewIpV4 = srcIp.find(':') == std::string::npos;
+                        bool keepIp = (it != nodes.end() && it->second.ip.find(':') == std::string::npos && !isNewIpV4);
                         nodes[announce.name] = {
                             announce.name,
-                            srcIp,
+                            keepIp ? it->second.ip : srcIp,
                             announce.services,
                             std::chrono::steady_clock::now(),
                             NodeStatus::Online,
