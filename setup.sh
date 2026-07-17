@@ -5,7 +5,7 @@ LNOS_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="${LNOS_DIR}/build"
 
 # Try to make stdin interactive (curl | bash compat)
-(exec < /dev/tty) 2>/dev/null && exec < /dev/tty || true
+(exec < /dev/tty) 2>/dev/null || true
 
 # ----- colors -----
 BOLD='\e[1m'
@@ -39,9 +39,12 @@ box()   { local lines=()
 INTERACTIVE=false
 [ -t 0 ] && INTERACTIVE=true
 
-prompt() { local v="$1" msg="$2" def="$3"
+prompt() {
+    local v="$1" msg="$2" def="$3"
     if $INTERACTIVE; then
-        read -r -p "$msg" "$v" 2>/dev/null || true
+        local r=false
+        read -r -p "$msg" "$v" < /dev/tty 2>/dev/null && r=true
+        $r || read -r -p "$msg" "$v" 2>/dev/null || true
     fi
     [ -z "$(eval echo \$$v)" ] && eval "$v=\$def"
 }
