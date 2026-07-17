@@ -89,24 +89,17 @@ CFG_DIR="$("$BUILD_DIR/lnosctl" init 2>&1 | grep -oP '/\S+lnos')"
 [ -n "$CFG_DIR" ] && CFG_DIR="${CFG_DIR:-$HOME/.config/lnos}"
 
 # ----- node name selection -----
-RANDOM_WORDS=(
-    "весёлая белочка" "быстрая панда" "сонный лис" "дикий кролик"
-    "мудрая сова" "ленивый мишка" "шумная птаха" "тихий ёжик"
-    "смелая рысь" "хитрая лиса" "добрая выдра" "гордый орёл"
-    "резвый конь" "цепкий рак" "толстый шмель" "яркая бабочка"
-    "колючий ёж" "прыткий заяц" "серая мышь" "полосатый енот"
-)
+DEVICE_NAMES=(laptop server node box desktop thinkpad raspi cubie macbook)
+DEVICE_TYPES=(pc server laptop pi node hub)
+OWNER_NAMES=(coldfox redcat bluejay greywolf darkowl silverfox goldfish wildbear moose coyote raven hawk eagle puma lynx bear wolf fox deer)
+
 HOSTNAME_BASED="$(hostname).pc.$(whoami)"
 
 pick_random_name() {
-    local i1=$((RANDOM % ${#RANDOM_WORDS[@]}))
-    local i2=$((RANDOM % ${#RANDOM_WORDS[@]}))
-    local i3=$((RANDOM % ${#RANDOM_WORDS[@]}))
-    # транслитерируем: убираем пробелы, заменяем русские буквы
-    local w1="${RANDOM_WORDS[$i1]// /_}"
-    local w2="${RANDOM_WORDS[$i2]// /_}"
-    local w3="${RANDOM_WORDS[$i3]// /_}"
-    echo "${w1}.${w2}.${w3}"
+    local d="${DEVICE_NAMES[$((RANDOM % ${#DEVICE_NAMES[@]}))]}"
+    local t="${DEVICE_TYPES[$((RANDOM % ${#DEVICE_TYPES[@]}))]}"
+    local o="${OWNER_NAMES[$((RANDOM % ${#OWNER_NAMES[@]}))]}"
+    echo "${d}.${t}.${o}"
 }
 
 check_name_free() {
