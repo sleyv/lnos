@@ -96,11 +96,11 @@ The application consists of a **background daemon** (`lnosd`) and a **CLI contro
 
 #### 1. Check the Dashboard
 
-Open http://localhost:8080 in your browser, or:
+Open http://localhost:9999 in your browser, or:
 
 ```bash
-curl http://localhost:8080/nodes    # JSON node list
-curl http://localhost:8080/stats    # JSON daemon metrics
+curl http://localhost:9999/nodes    # JSON node list
+curl http://localhost:9999/stats    # JSON daemon metrics
 ```
 
 #### 2. Control the Daemon
@@ -120,7 +120,7 @@ Once the NSS module is installed and the daemon is running, any program can reso
 ```bash
 ping laptop.dev.myxa
 ssh pc.main.gervaty
-curl http://pi.router.home:8080
+curl http://pi.router.home:9999
 ```
 
 ---

@@ -54,7 +54,7 @@
 - Тест `GossipSerialization` покрывает encode/decode
 
 ### HTTP Server UI
-Встроенный HTTP-сервер на порту 8080:
+Встроенный HTTP-сервер на порту 9999:
 - `GET /` — HTML-дашборд с auto-refresh (2 сек), метрики, таблица узлов
 - `GET /nodes` — JSON-список всех узлов с их сервисами и статусом
 - `GET /stats` — JSON-метрики демона

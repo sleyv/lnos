@@ -96,11 +96,11 @@ getent hosts $(hostname).pc.$(whoami)
 
 #### 1. Откройте дашборд
 
-Перейдите на http://localhost:8080 или используйте curl:
+Перейдите на http://localhost:9999 или используйте curl:
 
 ```bash
-curl http://localhost:8080/nodes    # JSON список узлов
-curl http://localhost:8080/stats    # JSON метрики демона
+curl http://localhost:9999/nodes    # JSON список узлов
+curl http://localhost:9999/stats    # JSON метрики демона
 ```
 
 #### 2. Управление демоном
@@ -120,7 +120,7 @@ lnosctl set port 5454               # Сменить порт
 ```bash
 ping laptop.dev.myxa
 ssh pc.main.gervaty
-curl http://pi.router.home:8080
+curl http://pi.router.home:9999
 ```
 
 ---

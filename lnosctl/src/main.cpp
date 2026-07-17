@@ -70,6 +70,7 @@ void printUsage(char *program_name) {
     std::cerr << "    set                   override LNOS config property\n";
     std::cerr << "    get                   print LNOS config property\n";
     std::cerr << "    stats                 print LNOS daemon statistics\n";
+    std::cerr << "    resolve <name>        resolve LNOS node name via running daemon\n";
 }
 
 int main(int argc, char** argv)
@@ -170,6 +171,60 @@ int main(int argc, char** argv)
 
         buf[n] = '\0';
         std::cout << "=== LNOS Daemon Statistics ===\n" << buf;
+        return 0;
+    } else if (command == "resolve") {
+        if (argc < 3) {
+            std::cerr << "Usage: " << argv[0] << " resolve <name>\n";
+            return 1;
+        }
+
+        std::string name = argv[2];
+        int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (sock < 0) {
+            std::cerr << "Failed to create UNIX socket\n";
+            return 1;
+        }
+
+        struct sockaddr_un un{};
+        un.sun_family = AF_UNIX;
+        std::string socket_path = lnos::getConfigDir() + "/lnosd.sock";
+        std::strncpy(un.sun_path, socket_path.c_str(), sizeof(un.sun_path) - 1);
+        un.sun_path[sizeof(un.sun_path) - 1] = '\0';
+
+        if (connect(sock, reinterpret_cast<sockaddr*>(&un), sizeof(un)) < 0) {
+            std::cerr << "Failed to connect to daemon at " << socket_path
+                      << " (is lnosd running?)\n";
+            close(sock);
+            return 1;
+        }
+
+        std::string query = name + "\n";
+        if (write(sock, query.data(), query.length()) < 0) {
+            std::cerr << "Failed to send request to daemon\n";
+            close(sock);
+            return 1;
+        }
+
+        char buf[1024];
+        ssize_t n = read(sock, buf, sizeof(buf) - 1);
+        close(sock);
+
+        if (n <= 0) {
+            std::cerr << "Failed to read response from daemon\n";
+            return 1;
+        }
+
+        buf[n] = '\0';
+        std::string resp(buf);
+        while (!resp.empty() && (resp.back() == '\n' || resp.back() == '\r'))
+            resp.pop_back();
+
+        if (resp == "NOT_FOUND") {
+            std::cout << "NOT_FOUND\n";
+            return 1;
+        }
+
+        std::cout << resp << "\n";
         return 0;
     } else {
         printUsage(argv[0]);

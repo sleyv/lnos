@@ -82,26 +82,97 @@ else
     info "Added 'lnos' to /etc/nsswitch.conf (before dns)"
 fi
 
-# ----- LNOS config -----
-info "Configuring LNOS..."
+# ----- generate keys first -----
+info "Generating keys..."
+"$BUILD_DIR/lnosctl" generatekeys
 CFG_DIR="$("$BUILD_DIR/lnosctl" init 2>&1 | grep -oP '/\S+lnos')"
 [ -n "$CFG_DIR" ] && CFG_DIR="${CFG_DIR:-$HOME/.config/lnos}"
 
-HOST="$(hostname)"
-USER="$(whoami)"
-read -r -p "Device name [$(hostname)]: " DEVICE
-DEVICE="${DEVICE:-$(hostname)}"
-read -r -p "Device type (pc/laptop/server/pi) [pc]: " DTYPE
-DTYPE="${DTYPE:-pc}"
-read -r -p "Owner [$(whoami)]: " OWNER
-OWNER="${OWNER:-$(whoami)}"
+# ----- node name selection -----
+RANDOM_WORDS=(
+    "весёлая белочка" "быстрая панда" "сонный лис" "дикий кролик"
+    "мудрая сова" "ленивый мишка" "шумная птаха" "тихий ёжик"
+    "смелая рысь" "хитрая лиса" "добрая выдра" "гордый орёл"
+    "резвый конь" "цепкий рак" "толстый шмель" "яркая бабочка"
+    "колючий ёж" "прыткий заяц" "серая мышь" "полосатый енот"
+)
+HOSTNAME_BASED="$(hostname).pc.$(whoami)"
 
-NODE_NAME="${DEVICE}.${DTYPE}.${OWNER}"
+pick_random_name() {
+    local i1=$((RANDOM % ${#RANDOM_WORDS[@]}))
+    local i2=$((RANDOM % ${#RANDOM_WORDS[@]}))
+    local i3=$((RANDOM % ${#RANDOM_WORDS[@]}))
+    # транслитерируем: убираем пробелы, заменяем русские буквы
+    local w1="${RANDOM_WORDS[$i1]// /_}"
+    local w2="${RANDOM_WORDS[$i2]// /_}"
+    local w3="${RANDOM_WORDS[$i3]// /_}"
+    echo "${w1}.${w2}.${w3}"
+}
+
+check_name_free() {
+    local name="$1"
+    local result
+    result=$("$BUILD_DIR/lnosctl" resolve "$name" 2>/dev/null)
+    # If resolve returns an IP (contains a digit), name is taken
+    case "$result" in
+        *[0-9]*) return 1 ;;  # taken
+        *)        return 0 ;;  # free
+    esac
+}
+
+# Start daemon temporarily for name collision check
+start_daemon_if_needed() {
+    if ! pgrep -x lnosd >/dev/null 2>&1; then
+        "$BUILD_DIR/lnosd" &
+        DAEMON_PID=$!
+        sleep 2
+    fi
+}
+
+stop_daemon_if_started() {
+    if [ -n "$DAEMON_PID" ]; then
+        kill "$DAEMON_PID" 2>/dev/null
+        wait "$DAEMON_PID" 2>/dev/null
+        unset DAEMON_PID
+    fi
+}
+
+info "Choose node name:"
+echo "  1) Hostname-based — $HOSTNAME_BASED"
+echo "  2) Random — $(pick_random_name)"
+echo "  3) Manual input"
+read -r -p "Choice [1]: " NAME_CHOICE
+NAME_CHOICE="${NAME_CHOICE:-1}"
+
+NODE_NAME=""
+while [ -z "$NODE_NAME" ]; do
+    case "$NAME_CHOICE" in
+        1) NODE_NAME="$HOSTNAME_BASED" ;;
+        2) NODE_NAME="$(pick_random_name)" ;;
+        3) read -r -p "Enter node name (device.type.owner): " NODE_NAME ;;
+        *) read -r -p "Invalid choice. Enter name manually: " NODE_NAME ;;
+    esac
+
+    if [ -n "$NODE_NAME" ]; then
+        start_daemon_if_needed
+        if ! check_name_free "$NODE_NAME"; then
+            echo ""
+            warn "Name '$NODE_NAME' is already taken on the network!"
+            echo "Choose another:"
+            echo "  1) Try another hostname-based"
+            echo "  2) Try another random"
+            echo "  3) Manual input"
+            read -r -p "Choice [2]: " NAME_CHOICE
+            NAME_CHOICE="${NAME_CHOICE:-2}"
+            NODE_NAME=""
+        fi
+    fi
+done
+
+stop_daemon_if_started
+
 "$BUILD_DIR/lnosctl" set name "$NODE_NAME"
 info "Node name → $NODE_NAME"
-
-info "Generating keys..."
-"$BUILD_DIR/lnosctl" generatekeys
 
 # ----- systemd service -----
 if command -v systemctl >/dev/null 2>&1; then
