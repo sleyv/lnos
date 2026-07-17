@@ -37,7 +37,12 @@ box()   { local lines=()
 
 # ----- interactive check -----
 INTERACTIVE=false
-[ -t 0 ] && INTERACTIVE=true
+if [ -t 0 ] || [ -t 1 ] || [ -t 2 ]; then
+    INTERACTIVE=true
+    if [ ! -t 0 ]; then
+        exec < /dev/tty 2>/dev/null || INTERACTIVE=false
+    fi
+fi
 
 prompt() {
     local v="$1" msg="$2" def="$3"
@@ -238,6 +243,8 @@ check_name_free() {
 
 start_temp_daemon() {
     info "Starting temporary daemon for collision check..."
+    # Cache sudo credentials in the foreground so background sudo doesn't block or get stopped
+    $SUDO true
     $SUDO "$BUILD_DIR/lnosd" > /dev/null 2>&1 &
     DAEMON_PID=$!
     SOCKET_PATH="${CFG_DIR}/lnosd.sock"
@@ -253,6 +260,8 @@ start_temp_daemon() {
 }
 
 stop_temp_daemon() {
+    # Cleanly kill the background lnosd child process by its build path
+    $SUDO pkill -f "$BUILD_DIR/lnosd" 2>/dev/null || true
     if [ -n "$DAEMON_PID" ]; then
         $SUDO kill "$DAEMON_PID" 2>/dev/null
         for i in 1 2 3 4 5; do
